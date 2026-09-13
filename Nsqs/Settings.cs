@@ -1,0 +1,111 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace Nsqs
+{
+    public enum IndexScheduleKind
+    {
+        Daily,
+        Weekly
+    }
+
+    public class IndexScheduleSettings
+    {
+        public bool Enabled { get; set; } = true;
+        public IndexScheduleKind Kind { get; set; } = IndexScheduleKind.Weekly;
+        public DayOfWeek DayOfWeek { get; set; } = DayOfWeek.Tuesday;
+
+        /// <summary>Local time of day, 24-hour HH:mm:ss.</summary>
+        public string TimeOfDay { get; set; } = "19:00:00";
+    }
+
+    public class AppSettings
+    {
+        public List<string> ShareRoots { get; set; } = new();
+        public string Hotkey { get; set; } = "Ctrl+Shift+Space";
+        public bool StartWithWindows { get; set; }
+        public bool LaunchToTray { get; set; } = true;
+        public IndexScheduleSettings IndexSchedule { get; set; } = new();
+        public bool RunMissedIndexOnStartup { get; set; } = true;
+        public int MaxResults { get; set; } = 50;
+
+        /// <summary>Empty = search all shares. Otherwise UNC roots to filter search.</summary>
+        public List<string> LastSearchShareRoots { get; set; } = new();
+
+        [Obsolete("Use LastSearchShareRoots.")]
+        public string LastSearchShareRoot { get; set; } = "";
+
+        public DateTime? LastIndexedAt { get; set; }
+        public int LastIndexEntryCount { get; set; }
+        public double LastIndexDurationSeconds { get; set; }
+        public string? LastIndexError { get; set; }
+
+        public static readonly JsonSerializerOptions JsonOptions = new()
+        {
+            WriteIndented = true,
+            Converters = { new JsonStringEnumConverter() }
+        };
+
+        public static string FilePath => AppPaths.SettingsFile;
+
+        public static AppSettings Load()
+        {
+            try
+            {
+                if (File.Exists(FilePath))
+                {
+                    var json = File.ReadAllText(FilePath);
+                    var settings = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions);
+                    if (settings != null)
+                    {
+                        MigrateSearchShareRoots(settings);
+                        return settings;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Log($"Settings.Load failed, using defaults: {ex.Message}");
+            }
+
+            return new AppSettings();
+        }
+
+        public void Save()
+        {
+            Directory.CreateDirectory(AppPaths.DataDirectory);
+            var json = JsonSerializer.Serialize(this, JsonOptions);
+            File.WriteAllText(FilePath, json);
+        }
+
+        public TimeSpan GetScheduleTimeOfDay()
+        {
+            if (TimeSpan.TryParse(IndexSchedule.TimeOfDay, out var time))
+                return time;
+
+            return new TimeSpan(19, 0, 0);
+        }
+
+        /// <summary>Formats a time-of-day for display/editing. TimeSpan uses hh, not DateTime's HH.</summary>
+        public static string FormatScheduleTime(TimeSpan time) => time.ToString(@"hh\:mm");
+
+        public static string FormatScheduleTimeWithSeconds(TimeSpan time) => time.ToString(@"hh\:mm\:ss");
+
+        private static void MigrateSearchShareRoots(AppSettings settings)
+        {
+            if (settings.LastSearchShareRoots.Count > 0)
+                return;
+
+#pragma warning disable CS0618
+            if (string.IsNullOrWhiteSpace(settings.LastSearchShareRoot))
+                return;
+
+            settings.LastSearchShareRoots.Add(settings.LastSearchShareRoot);
+            settings.LastSearchShareRoot = string.Empty;
+#pragma warning restore CS0618
+        }
+    }
+}
