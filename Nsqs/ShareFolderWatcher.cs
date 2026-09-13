@@ -9,7 +9,9 @@ namespace Nsqs
     public sealed class ShareFolderWatcher : IDisposable
     {
         private const int FlushDelayMs = 2000;
+        private const int FlushRetryDelayMs = 5000;
         private const int WatcherBufferBytes = 65536;
+        private const int PeriodicReconcileHours = 6;
 
         private readonly object _lock = new();
         private readonly HashSet<string> _pendingAdds = new(StringComparer.OrdinalIgnoreCase);
@@ -20,10 +22,12 @@ namespace Nsqs
 
         private Timer? _flushTimer;
         private Timer? _restartTimer;
+        private Timer? _periodicReconcileTimer;
         private Action<int>? _onIndexChanged;
         private bool _disposed;
         private int _errorRestartCount;
         private int _operationGeneration;
+        private int _periodicReconcileRootIndex;
 
         public void Start(IReadOnlyList<string> shareRoots, Action<int> onIndexChanged)
         {
@@ -32,7 +36,9 @@ namespace Nsqs
                 StopWatchersLocked(clearPending: false);
                 _onIndexChanged = onIndexChanged;
                 _errorRestartCount = 0;
+                _periodicReconcileRootIndex = 0;
                 AttachWatchers(shareRoots);
+                SchedulePeriodicReconcileLocked();
             }
         }
 
@@ -144,6 +150,34 @@ namespace Nsqs
             _restartTimer = new Timer(_ => RestartWatchersPreservePending(), null, delay, Timeout.InfiniteTimeSpan);
         }
 
+        private void SchedulePeriodicReconcileLocked()
+        {
+            _periodicReconcileTimer?.Dispose();
+            if (_shareRoots.Count == 0)
+                return;
+
+            _periodicReconcileTimer = new Timer(
+                _ => QueuePeriodicReconcile(),
+                null,
+                TimeSpan.FromHours(PeriodicReconcileHours),
+                TimeSpan.FromHours(PeriodicReconcileHours));
+        }
+
+        private void QueuePeriodicReconcile()
+        {
+            lock (_lock)
+            {
+                if (_disposed || _onIndexChanged == null || _shareRoots.Count == 0)
+                    return;
+
+                var root = _shareRoots[_periodicReconcileRootIndex % _shareRoots.Count];
+                _periodicReconcileRootIndex++;
+                _pendingReconcileRoots.Add(root);
+                ScheduleFlushLocked();
+                Diagnostics.Log($"Scheduled periodic index reconcile for {root}");
+            }
+        }
+
         private void RestartWatchersPreservePending()
         {
             lock (_lock)
@@ -159,6 +193,7 @@ namespace Nsqs
                 StopWatchersLocked(clearPending: false);
                 AttachWatchers(roots);
                 _onIndexChanged = callback;
+                SchedulePeriodicReconcileLocked();
                 ScheduleFlushLocked();
             }
         }
@@ -201,6 +236,12 @@ namespace Nsqs
         {
             _flushTimer ??= new Timer(_ => FlushPendingChanges(), null, Timeout.Infinite, Timeout.Infinite);
             _flushTimer.Change(FlushDelayMs, Timeout.Infinite);
+        }
+
+        private void ScheduleFlushRetryLocked()
+        {
+            _flushTimer ??= new Timer(_ => FlushPendingChanges(), null, Timeout.Infinite, Timeout.Infinite);
+            _flushTimer.Change(FlushRetryDelayMs, Timeout.Infinite);
         }
 
         private void FlushPendingChanges()
@@ -281,6 +322,27 @@ namespace Nsqs
             catch (Exception ex)
             {
                 Diagnostics.Log($"Share folder watch flush failed: {ex.Message}");
+                RequeueFailedFlush(adds, removes, reconcileRoots);
+            }
+        }
+
+        private void RequeueFailedFlush(IReadOnlyList<string> adds, IReadOnlyList<string> removes, IReadOnlyList<string> reconcileRoots)
+        {
+            lock (_lock)
+            {
+                if (_disposed || _onIndexChanged == null)
+                    return;
+
+                foreach (var path in adds)
+                    _pendingAdds.Add(path);
+
+                foreach (var path in removes)
+                    _pendingRemoves.Add(path);
+
+                foreach (var root in reconcileRoots)
+                    _pendingReconcileRoots.Add(root);
+
+                ScheduleFlushRetryLocked();
             }
         }
 
@@ -291,6 +353,8 @@ namespace Nsqs
             _flushTimer = null;
             _restartTimer?.Dispose();
             _restartTimer = null;
+            _periodicReconcileTimer?.Dispose();
+            _periodicReconcileTimer = null;
 
             if (clearPending)
             {

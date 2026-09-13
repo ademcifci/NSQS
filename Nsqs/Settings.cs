@@ -109,6 +109,39 @@ namespace Nsqs
         {
             settings.ShareRoots.RemoveAll(root => ShareIndexer.NormalizeUncRoot(root) == null);
             settings.LastSearchShareRoots.RemoveAll(root => ShareIndexer.NormalizeUncRoot(root) == null);
+            PruneSearchShareRoots(settings);
+            ClampMaxResults(settings);
+        }
+
+        internal static void PruneSearchShareRoots(AppSettings settings)
+        {
+            if (settings.LastSearchShareRoots.Count == 0)
+                return;
+
+            settings.LastSearchShareRoots.RemoveAll(filter =>
+            {
+                var normalizedFilter = ShareIndexer.NormalizeUncRoot(filter);
+                if (normalizedFilter == null)
+                    return true;
+
+                foreach (var root in settings.ShareRoots)
+                {
+                    var normalizedRoot = ShareIndexer.NormalizeUncRoot(root);
+                    if (normalizedRoot != null &&
+                        string.Equals(normalizedRoot, normalizedFilter, StringComparison.OrdinalIgnoreCase))
+                        return false;
+                }
+
+                return true;
+            });
+        }
+
+        internal static void ClampMaxResults(AppSettings settings)
+        {
+            if (settings.MaxResults < 1)
+                settings.MaxResults = 1;
+            else if (settings.MaxResults > 500)
+                settings.MaxResults = 500;
         }
 
         public TimeSpan GetScheduleTimeOfDay()

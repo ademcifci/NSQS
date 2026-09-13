@@ -37,7 +37,6 @@ namespace Nsqs
 
         public bool TryRebuildAsync(
             IReadOnlyList<string> shareRoots,
-            AppSettings settings,
             Action? releaseLiveIndexLocks = null,
             CancellationToken cancellationToken = default)
         {
@@ -47,7 +46,7 @@ namespace Nsqs
                     return false;
 
                 _runningTask = Task.Run(
-                    async () => await RunRebuildAsync(shareRoots, settings, releaseLiveIndexLocks, cancellationToken),
+                    async () => await RunRebuildAsync(shareRoots, releaseLiveIndexLocks, cancellationToken),
                     cancellationToken);
                 return true;
             }
@@ -68,7 +67,7 @@ namespace Nsqs
             Action? releaseLiveIndexLocks = null,
             CancellationToken cancellationToken = default)
         {
-            if (!TryRebuildAsync(shareRoots, settings, releaseLiveIndexLocks, cancellationToken))
+            if (!TryRebuildAsync(shareRoots, releaseLiveIndexLocks, cancellationToken))
                 throw new InvalidOperationException("An index rebuild is already running.");
 
             return _runningTask!;
@@ -139,7 +138,6 @@ namespace Nsqs
 
         private async Task RunRebuildAsync(
             IReadOnlyList<string> shareRoots,
-            AppSettings settings,
             Action? releaseLiveIndexLocks,
             CancellationToken cancellationToken)
         {
@@ -234,8 +232,7 @@ namespace Nsqs
                     IndexFileHelper.DeleteDatabaseFiles(buildingPath);
 
                     var message = BuildAllRootsUnreachableMessage();
-                    settings.LastIndexError = message;
-                    AppSettingsManager.Save(settings);
+                    AppSettingsManager.SaveIndexMetadata(new IndexMetadata { LastIndexError = message });
                     Diagnostics.Log(message);
                     Report(new IndexProgress
                     {
@@ -264,17 +261,17 @@ namespace Nsqs
                 store.SetMeta("entry_count", total.ToString());
                 store.Close();
 
-                releaseLiveIndexLocks?.Invoke();
                 IndexFileHelper.SwapDatabaseFiles(buildingPath, livePath, releaseLiveIndexLocks);
 
                 sw.Stop();
-                settings.LastIndexedAt = DateTime.Now;
-                settings.LastIndexEntryCount = total;
-                settings.LastIndexDurationSeconds = sw.Elapsed.TotalSeconds;
-                settings.LastIndexError = skippedRoots.Count > 0
-                    ? BuildSkippedRootsWarning(skippedRoots)
-                    : null;
-                AppSettingsManager.Save(settings);
+                AppSettingsManager.SaveIndexMetadata(new IndexMetadata
+                {
+                    LastIndexedAt = DateTime.Now,
+                    LastIndexEntryCount = total,
+                    LastIndexDurationSeconds = sw.Elapsed.TotalSeconds,
+                    LastIndexError = skippedRoots.Count > 0 ? BuildSkippedRootsWarning(skippedRoots) : null,
+                    ClearLastIndexError = skippedRoots.Count == 0
+                });
 
                 Diagnostics.Log($"Index rebuild complete: {total} folders in {sw.Elapsed.TotalSeconds:F1}s");
                 Report(new IndexProgress { FoldersIndexed = total, IsComplete = true, ElapsedSeconds = sw.Elapsed.TotalSeconds });
@@ -290,13 +287,11 @@ namespace Nsqs
                     IsComplete = true,
                     ElapsedSeconds = sw.Elapsed.TotalSeconds
                 });
-                throw;
             }
             catch (Exception ex)
             {
                 sw.Stop();
-                settings.LastIndexError = ex.Message;
-                AppSettingsManager.Save(settings);
+                AppSettingsManager.SaveIndexMetadata(new IndexMetadata { LastIndexError = ex.Message });
                 Diagnostics.Log($"Index rebuild failed: {ex}");
                 Report(new IndexProgress { IsFailed = true, ErrorMessage = ex.Message, IsComplete = true });
                 try { IndexFileHelper.DeleteDatabaseFiles(buildingPath); } catch { /* ignore */ }

@@ -62,6 +62,7 @@ namespace Nsqs
                 StartupHelper.RepairPathIfEnabled();
                 _settings = AppSettingsManager.Load();
 
+                IndexFileHelper.CleanupStaleIndexFiles(AppPaths.IndexFile, AppPaths.IndexBuildingFile);
                 EnsureIndexDatabase();
                 if (File.Exists(AppPaths.IndexFile))
                     IndexStore.ConfigureLiveDatabase(AppPaths.IndexFile);
@@ -107,6 +108,7 @@ namespace Nsqs
         private void OnDispatcherUnhandledException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs args)
         {
             Diagnostics.Log($"UNHANDLED (dispatcher): {args.Exception}");
+            _trayIcon?.ShowWarning(App.ShortName, "An unexpected error occurred. See debug.log.");
             args.Handled = true;
         }
 
@@ -180,7 +182,8 @@ namespace Nsqs
             }
 
             Diagnostics.Log($"Hotkey registration failed: {error}");
-            _trayIcon?.SetStatus($"{ProductName} (hotkey unavailable)");
+            _trayIcon?.SetStatus($"{ProductName} (hotkey unavailable)", error);
+            _trayIcon?.ShowWarning(App.ShortName, error ?? "Hotkey unavailable.");
         }
 
         private void ToggleLauncher()
@@ -329,7 +332,6 @@ namespace Nsqs
 
             if (!_indexer.TryRebuildAsync(
                     _settings.ShareRoots,
-                    _settings,
                     PrepareForIndexRebuild,
                     _appLifetimeCts.Token))
             {
@@ -392,7 +394,7 @@ namespace Nsqs
             {
                 if (!string.IsNullOrEmpty(_settings.LastIndexError))
                 {
-                    _trayIcon.SetStatus($"{ProductName}: {_settings.LastIndexEntryCount:N0} folders — warning");
+                    _trayIcon.SetStatus($"{ProductName}: {_settings.LastIndexEntryCount:N0} folders", "warning");
                     return;
                 }
 
@@ -440,7 +442,7 @@ namespace Nsqs
             }
 
             _settingsWindow = new SettingsWindow(
-                _settings,
+                () => _settings,
                 _indexer,
                 _scheduler!,
                 onSaved: () =>

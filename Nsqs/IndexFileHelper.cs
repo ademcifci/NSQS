@@ -124,5 +124,41 @@ namespace Nsqs
                 return false;
             }
         }
+
+        public static void CleanupStaleIndexFiles(string livePath, string buildingPath)
+        {
+            if (File.Exists(buildingPath))
+            {
+                try
+                {
+                    DeleteDatabaseFiles(buildingPath);
+                    Diagnostics.Log("Removed stale building index from prior session.");
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.Log($"Failed to remove building index: {ex.Message}");
+                }
+            }
+
+            var backupPath = livePath + ".bak";
+            if (!File.Exists(backupPath))
+                return;
+
+            if (File.Exists(livePath) && IsValidDatabase(livePath))
+            {
+                try
+                {
+                    DeleteDatabaseFiles(backupPath);
+                    Diagnostics.Log("Removed orphan index backup.");
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.Log($"Failed to remove orphan index backup: {ex.Message}");
+                }
+                return;
+            }
+
+            RestoreLiveFromBackup(livePath, backupPath);
+        }
     }
 }

@@ -204,6 +204,64 @@ namespace Nsqs
             return paths;
         }
 
+        public static IncrementalApplyResult PurgeShareRoots(string dbPath, IReadOnlyList<string> removedRoots)
+        {
+            if (!File.Exists(dbPath) || removedRoots.Count == 0)
+                return new IncrementalApplyResult(0, 0, 0);
+
+            var normalizedRoots = new List<string>();
+            foreach (var root in removedRoots)
+            {
+                var normalizedRoot = ShareIndexer.NormalizeUncRoot(root);
+                if (normalizedRoot != null)
+                    normalizedRoots.Add(normalizedRoot);
+            }
+
+            if (normalizedRoots.Count == 0)
+                return new IncrementalApplyResult(0, 0, 0);
+
+            using var connection = OpenReadWriteConnection(dbPath);
+            var removed = 0;
+
+            using (var tx = connection.BeginTransaction())
+            {
+                using var deleteCmd = connection.CreateCommand();
+                deleteCmd.Transaction = tx;
+                deleteCmd.CommandText = "DELETE FROM folders_fts WHERE root_share = $root;";
+                var rootParam = deleteCmd.CreateParameter();
+                rootParam.ParameterName = "$root";
+                deleteCmd.Parameters.Add(rootParam);
+
+                foreach (var root in normalizedRoots)
+                {
+                    rootParam.Value = root;
+                    removed += deleteCmd.ExecuteNonQuery();
+                }
+
+                var total = QueryEntryCount(connection, tx);
+                using (var metaCmd = connection.CreateCommand())
+                {
+                    metaCmd.Transaction = tx;
+                    metaCmd.CommandText = """
+                        INSERT INTO meta (key, value) VALUES ('entry_count', $value)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+                        """;
+                    metaCmd.Parameters.AddWithValue("$value", total.ToString());
+                    metaCmd.ExecuteNonQuery();
+                }
+
+                tx.Commit();
+                return new IncrementalApplyResult(0, removed, total);
+            }
+        }
+
+        internal static string EscapeLikePattern(string value)
+        {
+            return value
+                .Replace("%", "\\%", StringComparison.Ordinal)
+                .Replace("_", "\\_", StringComparison.Ordinal);
+        }
+
         public static void InitializeDatabase(string dbPath)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
@@ -374,7 +432,7 @@ namespace Nsqs
                             continue;
 
                         pathParam.Value = normalized;
-                        prefixParam.Value = normalized.TrimEnd('\\') + "\\%";
+                        prefixParam.Value = EscapeLikePattern(normalized.TrimEnd('\\')) + "\\%";
                         removed += deleteCmd.ExecuteNonQuery();
                     }
                 }

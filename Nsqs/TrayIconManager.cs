@@ -68,9 +68,31 @@ namespace Nsqs
             LauncherRequested?.Invoke();
         }
 
-        public void SetStatus(string text)
+        public void SetStatus(string text, string? prioritySuffix = null)
         {
+            if (!string.IsNullOrEmpty(prioritySuffix))
+                text = FormatTrayText(text, prioritySuffix);
+
             _notifyIcon.Text = text.Length > 63 ? text[..63] : text;
+        }
+
+        public void ShowWarning(string title, string message, int timeoutMs = 5000)
+        {
+            _notifyIcon.ShowBalloonTip(timeoutMs, title, message, ToolTipIcon.Warning);
+        }
+
+        private static string FormatTrayText(string text, string prioritySuffix)
+        {
+            const int maxLength = 63;
+            var suffix = $" — {prioritySuffix}";
+            if (text.Length + suffix.Length <= maxLength)
+                return text + suffix;
+
+            var available = maxLength - suffix.Length;
+            if (available < 8)
+                return prioritySuffix.Length <= maxLength ? prioritySuffix : prioritySuffix[..maxLength];
+
+            return text[..available] + suffix;
         }
 
         public void SetRebuildEnabled(bool enabled)

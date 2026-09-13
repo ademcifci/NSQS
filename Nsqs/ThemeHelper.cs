@@ -66,5 +66,10 @@ namespace Nsqs
             brush.Freeze();
             return brush;
         }
+
+        public static void SetFrozenBrush(System.Windows.ResourceDictionary resources, string key, Color color)
+        {
+            resources[key] = CreateFrozenBrush(color);
+        }
     }
 }

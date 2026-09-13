@@ -499,22 +499,22 @@ namespace Nsqs
             var checkboxBorder = dark ? Color.FromRgb(0xAD, 0xAD, 0xAD) : Color.FromRgb(0x76, 0x76, 0x76);
             var listFocus = dark ? Color.FromArgb(68, 255, 255, 255) : Color.FromArgb(40, 0, 0, 0);
 
-            RootBorder.Background = new SolidColorBrush(bg);
-            RootBorder.BorderBrush = new SolidColorBrush(controlBorder);
-            SearchBox.Foreground = new SolidColorBrush(fg);
-            SearchBox.CaretBrush = new SolidColorBrush(fg);
-            HintText.Foreground = new SolidColorBrush(subtle);
-            Resources["ResultHoverBrush"] = new SolidColorBrush(hover);
-            Resources["ResultForegroundBrush"] = new SolidColorBrush(fg);
-            Resources["ResultSubtleBrush"] = new SolidColorBrush(subtle);
-            Resources["LauncherControlBackgroundBrush"] = new SolidColorBrush(controlBg);
-            Resources["LauncherControlBorderBrush"] = new SolidColorBrush(controlBorder);
-            Resources["FilterPillBackgroundBrush"] = new SolidColorBrush(pillBg);
-            Resources["FilterPillBorderBrush"] = new SolidColorBrush(pillBorder);
-            Resources["FilterPillForegroundBrush"] = new SolidColorBrush(pillFg);
-            Resources["FilterPillRemoveBrush"] = new SolidColorBrush(pillRemove);
-            Resources["FilterCheckboxBorderBrush"] = new SolidColorBrush(checkboxBorder);
-            Resources["FilterListFocusBrush"] = new SolidColorBrush(listFocus);
+            RootBorder.Background = ThemeHelper.CreateFrozenBrush(bg);
+            RootBorder.BorderBrush = ThemeHelper.CreateFrozenBrush(controlBorder);
+            SearchBox.Foreground = ThemeHelper.CreateFrozenBrush(fg);
+            SearchBox.CaretBrush = ThemeHelper.CreateFrozenBrush(fg);
+            HintText.Foreground = ThemeHelper.CreateFrozenBrush(subtle);
+            Resources["ResultHoverBrush"] = ThemeHelper.CreateFrozenBrush(hover);
+            Resources["ResultForegroundBrush"] = ThemeHelper.CreateFrozenBrush(fg);
+            Resources["ResultSubtleBrush"] = ThemeHelper.CreateFrozenBrush(subtle);
+            Resources["LauncherControlBackgroundBrush"] = ThemeHelper.CreateFrozenBrush(controlBg);
+            Resources["LauncherControlBorderBrush"] = ThemeHelper.CreateFrozenBrush(controlBorder);
+            Resources["FilterPillBackgroundBrush"] = ThemeHelper.CreateFrozenBrush(pillBg);
+            Resources["FilterPillBorderBrush"] = ThemeHelper.CreateFrozenBrush(pillBorder);
+            Resources["FilterPillForegroundBrush"] = ThemeHelper.CreateFrozenBrush(pillFg);
+            Resources["FilterPillRemoveBrush"] = ThemeHelper.CreateFrozenBrush(pillRemove);
+            Resources["FilterCheckboxBorderBrush"] = ThemeHelper.CreateFrozenBrush(checkboxBorder);
+            Resources["FilterListFocusBrush"] = ThemeHelper.CreateFrozenBrush(listFocus);
 
             try
             {
@@ -522,12 +522,12 @@ namespace Nsqs
             }
             catch
             {
-                Resources["AccentBrush"] = new SolidColorBrush(ThemeHelper.GetSystemAccentColor());
+                Resources["AccentBrush"] = ThemeHelper.CreateFrozenBrush(ThemeHelper.GetSystemAccentColor());
             }
 
             var accentColor = ((SolidColorBrush)Resources["AccentBrush"]).Color;
             var dropdownFocus = Color.FromArgb(dark ? (byte)72 : (byte)48, accentColor.R, accentColor.G, accentColor.B);
-            Resources["FilterDropdownFocusBrush"] = new SolidColorBrush(dropdownFocus);
+            Resources["FilterDropdownFocusBrush"] = ThemeHelper.CreateFrozenBrush(dropdownFocus);
         }
 
         private void FadeTo(double target, Action? onComplete = null)

@@ -106,4 +106,45 @@ public class IndexStoreTests
             TestFileHelper.DeleteTempDirectory(tempDir);
         }
     }
+
+    [Theory]
+    [InlineData("folder%name", "folder\\%name")]
+    [InlineData("a_b", "a\\_b")]
+    public void EscapeLikePattern_EscapesMetacharacters(string input, string expected)
+    {
+        Assert.Equal(expected, IndexStore.EscapeLikePattern(input));
+    }
+
+    [Fact]
+    public void PurgeShareRoots_RemovesAllFoldersUnderRoot()
+    {
+        var tempDir = TestFileHelper.CreateTempDirectory();
+        var dbPath = Path.Combine(tempDir, "index.db");
+
+        try
+        {
+            IndexStore.InitializeDatabase(dbPath);
+            var keepRoot = "\\\\server\\keep\\";
+            var removeRoot = "\\\\server\\remove\\";
+
+            IndexStore.ApplyIncrementalChanges(dbPath,
+            [
+                new FolderEntry { Name = "Keep", Path = "\\\\server\\keep\\Docs", RootShare = keepRoot },
+                new FolderEntry { Name = "Remove", Path = "\\\\server\\remove\\Old", RootShare = removeRoot }
+            ],
+            []);
+
+            var result = IndexStore.PurgeShareRoots(dbPath, [removeRoot]);
+
+            Assert.True(result.Removed >= 1);
+            Assert.Equal(1, result.TotalCount);
+
+            var remaining = IndexStore.SearchSnapshot(dbPath, "Keep", 10, null);
+            Assert.Single(remaining);
+        }
+        finally
+        {
+            TestFileHelper.DeleteTempDirectory(tempDir);
+        }
+    }
 }

@@ -98,4 +98,31 @@ public class IndexFileHelperTests
             TestFileHelper.DeleteTempDirectory(tempDir);
         }
     }
+
+    [Fact]
+    public void CleanupStaleIndexFiles_RemovesBuildingFileAndOrphanBackup()
+    {
+        var tempDir = TestFileHelper.CreateTempDirectory();
+        var livePath = Path.Combine(tempDir, "index.db");
+        var buildingPath = Path.Combine(tempDir, "index.building.db");
+        var backupPath = livePath + ".bak";
+
+        try
+        {
+            Directory.CreateDirectory(tempDir);
+            IndexStore.InitializeDatabase(livePath);
+            File.WriteAllText(buildingPath, "stale");
+            File.Copy(livePath, backupPath, overwrite: true);
+
+            IndexFileHelper.CleanupStaleIndexFiles(livePath, buildingPath);
+
+            Assert.False(File.Exists(buildingPath));
+            Assert.False(File.Exists(backupPath));
+            Assert.True(File.Exists(livePath));
+        }
+        finally
+        {
+            TestFileHelper.DeleteTempDirectory(tempDir);
+        }
+    }
 }

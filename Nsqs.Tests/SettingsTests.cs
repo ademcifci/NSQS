@@ -60,4 +60,31 @@ public class SettingsTests
             TestFileHelper.DeleteTempDirectory(tempDir);
         }
     }
+
+    [Fact]
+    public void PruneSearchShareRoots_RemovesFiltersForRemovedShares()
+    {
+        var settings = new AppSettings
+        {
+            ShareRoots = ["\\\\server\\movies\\"],
+            LastSearchShareRoots = ["\\\\server\\movies\\", "\\\\server\\tv\\"]
+        };
+
+        AppSettings.PruneSearchShareRoots(settings);
+
+        Assert.Single(settings.LastSearchShareRoots);
+        Assert.Equal("\\\\server\\movies\\", settings.LastSearchShareRoots[0]);
+    }
+
+    [Fact]
+    public void ClampMaxResults_EnforcesBounds()
+    {
+        var settings = new AppSettings { MaxResults = 9999 };
+        AppSettings.ClampMaxResults(settings);
+        Assert.Equal(500, settings.MaxResults);
+
+        settings.MaxResults = 0;
+        AppSettings.ClampMaxResults(settings);
+        Assert.Equal(1, settings.MaxResults);
+    }
 }
