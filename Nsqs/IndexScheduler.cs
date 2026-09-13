@@ -8,8 +8,7 @@ namespace Nsqs
     {
         private readonly ShareIndexer _indexer;
         private readonly Func<AppSettings> _getSettings;
-        private readonly Action _beforeRebuild;
-        private readonly Action _onIndexCompleted;
+        private readonly Action _requestRebuild;
         private readonly Func<CancellationToken> _getCancellationToken;
         private CancellationTokenSource? _timerCts;
         private readonly object _lock = new();
@@ -18,14 +17,12 @@ namespace Nsqs
         public IndexScheduler(
             ShareIndexer indexer,
             Func<AppSettings> getSettings,
-            Action beforeRebuild,
-            Action onIndexCompleted,
+            Action requestRebuild,
             Func<CancellationToken> getCancellationToken)
         {
             _indexer = indexer;
             _getSettings = getSettings;
-            _beforeRebuild = beforeRebuild;
-            _onIndexCompleted = onIndexCompleted;
+            _requestRebuild = requestRebuild;
             _getCancellationToken = getCancellationToken;
         }
 
@@ -100,9 +97,9 @@ namespace Nsqs
 
             try
             {
-                _beforeRebuild();
-                await _indexer.RebuildAsync(settings.ShareRoots, settings, _beforeRebuild, _getCancellationToken());
-                _onIndexCompleted();
+                _requestRebuild();
+                if (_indexer.IsRunning)
+                    await _indexer.WaitForCurrentRebuildAsync();
             }
             catch (OperationCanceledException)
             {

@@ -53,6 +53,16 @@ namespace Nsqs
 
         public static AppSettings Load()
         {
+            return AppSettingsManager.Load();
+        }
+
+        public void Save()
+        {
+            AppSettingsManager.Save(this);
+        }
+
+        internal static AppSettings LoadCore()
+        {
             try
             {
                 if (File.Exists(FilePath))
@@ -62,6 +72,7 @@ namespace Nsqs
                     if (settings != null)
                     {
                         MigrateSearchShareRoots(settings);
+                        ValidateShareRoots(settings);
                         return settings;
                     }
                 }
@@ -74,11 +85,63 @@ namespace Nsqs
             return new AppSettings();
         }
 
-        public void Save()
+        internal static void SaveCore(AppSettings settings)
         {
-            Directory.CreateDirectory(AppPaths.DataDirectory);
-            var json = JsonSerializer.Serialize(this, JsonOptions);
-            File.WriteAllText(FilePath, json);
+            SaveCoreToPath(settings, FilePath);
+        }
+
+        internal static void SaveCoreToPath(AppSettings settings, string filePath)
+        {
+            ValidateShareRoots(settings);
+            Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
+
+            var json = JsonSerializer.Serialize(settings, JsonOptions);
+            var tempPath = filePath + ".tmp";
+            File.WriteAllText(tempPath, json);
+
+            if (File.Exists(filePath))
+                File.Replace(tempPath, filePath, destinationBackupFileName: filePath + ".bak", ignoreMetadataErrors: true);
+            else
+                File.Move(tempPath, filePath);
+        }
+
+        private static void ValidateShareRoots(AppSettings settings)
+        {
+            settings.ShareRoots.RemoveAll(root => ShareIndexer.NormalizeUncRoot(root) == null);
+            settings.LastSearchShareRoots.RemoveAll(root => ShareIndexer.NormalizeUncRoot(root) == null);
+            PruneSearchShareRoots(settings);
+            ClampMaxResults(settings);
+        }
+
+        internal static void PruneSearchShareRoots(AppSettings settings)
+        {
+            if (settings.LastSearchShareRoots.Count == 0)
+                return;
+
+            settings.LastSearchShareRoots.RemoveAll(filter =>
+            {
+                var normalizedFilter = ShareIndexer.NormalizeUncRoot(filter);
+                if (normalizedFilter == null)
+                    return true;
+
+                foreach (var root in settings.ShareRoots)
+                {
+                    var normalizedRoot = ShareIndexer.NormalizeUncRoot(root);
+                    if (normalizedRoot != null &&
+                        string.Equals(normalizedRoot, normalizedFilter, StringComparison.OrdinalIgnoreCase))
+                        return false;
+                }
+
+                return true;
+            });
+        }
+
+        internal static void ClampMaxResults(AppSettings settings)
+        {
+            if (settings.MaxResults < 1)
+                settings.MaxResults = 1;
+            else if (settings.MaxResults > 500)
+                settings.MaxResults = 500;
         }
 
         public TimeSpan GetScheduleTimeOfDay()

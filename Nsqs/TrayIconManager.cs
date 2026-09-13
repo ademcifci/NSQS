@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.Windows.Forms;
 
 namespace Nsqs
@@ -6,30 +7,28 @@ namespace Nsqs
     public sealed class TrayIconManager : IDisposable
     {
         private readonly NotifyIcon _notifyIcon;
-        private readonly AppSettings _settings;
+        private readonly Func<AppSettings> _getSettings;
+        private readonly Action<bool> _onStartWithWindowsChanged;
         private readonly ToolStripMenuItem _startWithWindowsItem;
         private readonly ToolStripMenuItem _rebuildItem;
+        private readonly CancelEventHandler _menuOpeningHandler;
 
         public event Action? LauncherRequested;
         public event Action? SettingsRequested;
         public event Action? RebuildIndexRequested;
         public event Action? ExitRequested;
 
-        public TrayIconManager(AppSettings settings)
+        public TrayIconManager(Func<AppSettings> getSettings, Action<bool> onStartWithWindowsChanged)
         {
-            _settings = settings;
+            _getSettings = getSettings;
+            _onStartWithWindowsChanged = onStartWithWindowsChanged;
 
             _startWithWindowsItem = new ToolStripMenuItem("Start with Windows")
             {
                 CheckOnClick = true,
-                Checked = _settings.StartWithWindows
+                Checked = _getSettings().StartWithWindows
             };
-            _startWithWindowsItem.Click += (_, _) =>
-            {
-                _settings.StartWithWindows = _startWithWindowsItem.Checked;
-                _settings.Save();
-                StartupHelper.SetEnabled(_settings.StartWithWindows);
-            };
+            _startWithWindowsItem.Click += OnStartWithWindowsClick;
 
             _rebuildItem = new ToolStripMenuItem("Rebuild index now", null, (_, _) => RebuildIndexRequested?.Invoke());
 
@@ -42,7 +41,8 @@ namespace Nsqs
             menu.Items.Add(_startWithWindowsItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add($"Exit {App.ShortName}", null, (_, _) => ExitRequested?.Invoke());
-            menu.Opening += (_, _) => _startWithWindowsItem.Checked = _settings.StartWithWindows;
+            _menuOpeningHandler = (_, _) => _startWithWindowsItem.Checked = _getSettings().StartWithWindows;
+            menu.Opening += _menuOpeningHandler;
 
             _notifyIcon = new NotifyIcon
             {
@@ -52,22 +52,49 @@ namespace Nsqs
                 ContextMenuStrip = menu
             };
 
-            _notifyIcon.MouseClick += (_, e) =>
-            {
-                if (e.Button == MouseButtons.Left)
-                    LauncherRequested?.Invoke();
-            };
-
-            _notifyIcon.MouseDoubleClick += (_, e) =>
-            {
-                if (e.Button == MouseButtons.Left)
-                    LauncherRequested?.Invoke();
-            };
+            _notifyIcon.MouseClick += OnNotifyIconMouseClick;
         }
 
-        public void SetStatus(string text)
+        private void OnStartWithWindowsClick(object? sender, EventArgs e)
         {
+            _onStartWithWindowsChanged(_startWithWindowsItem.Checked);
+        }
+
+        private void OnNotifyIconMouseClick(object? sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left)
+                return;
+
+            // NotifyIcon raises MouseClick with Clicks=0 (see WmMouseUp in NotifyIcon).
+            // Do not require Clicks==1 — that would block all tray left-clicks.
+            LauncherRequested?.Invoke();
+        }
+
+        public void SetStatus(string text, string? prioritySuffix = null)
+        {
+            if (!string.IsNullOrEmpty(prioritySuffix))
+                text = FormatTrayText(text, prioritySuffix);
+
             _notifyIcon.Text = text.Length > 63 ? text[..63] : text;
+        }
+
+        public void ShowWarning(string title, string message, int timeoutMs = 5000)
+        {
+            _notifyIcon.ShowBalloonTip(timeoutMs, title, message, ToolTipIcon.Warning);
+        }
+
+        private static string FormatTrayText(string text, string prioritySuffix)
+        {
+            const int maxLength = 63;
+            var suffix = $" — {prioritySuffix}";
+            if (text.Length + suffix.Length <= maxLength)
+                return text + suffix;
+
+            var available = maxLength - suffix.Length;
+            if (available < 8)
+                return prioritySuffix.Length <= maxLength ? prioritySuffix : prioritySuffix[..maxLength];
+
+            return text[..available] + suffix;
         }
 
         public void SetRebuildEnabled(bool enabled)
@@ -75,8 +102,17 @@ namespace Nsqs
             _rebuildItem.Enabled = enabled;
         }
 
+        public void RefreshSettings()
+        {
+            _startWithWindowsItem.Checked = _getSettings().StartWithWindows;
+        }
+
         public void Dispose()
         {
+            _notifyIcon.MouseClick -= OnNotifyIconMouseClick;
+            _startWithWindowsItem.Click -= OnStartWithWindowsClick;
+            _notifyIcon.ContextMenuStrip!.Opening -= _menuOpeningHandler;
+
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
         }

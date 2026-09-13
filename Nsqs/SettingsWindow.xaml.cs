@@ -12,14 +12,17 @@ namespace Nsqs
 {
     public partial class SettingsWindow : Window
     {
-        private readonly AppSettings _settings;
+        private AppSettings _settings;
+        private readonly Func<AppSettings> _getSettings;
         private readonly ShareIndexer _indexer;
         private readonly IndexScheduler _scheduler;
         private readonly Action _onSaved;
         private readonly Action _requestRebuild;
+        private bool _isDirty;
+        private bool _suppressDirty;
 
         public SettingsWindow(
-            AppSettings settings,
+            Func<AppSettings> getSettings,
             ShareIndexer indexer,
             IndexScheduler scheduler,
             Action onSaved,
@@ -29,30 +32,100 @@ namespace Nsqs
             Icon = IconFactory.CreateWindowIconSource();
             ApplyWindowTheme();
 
-            _settings = settings;
+            _getSettings = getSettings;
             _indexer = indexer;
             _scheduler = scheduler;
             _onSaved = onSaved;
             _requestRebuild = requestRebuild;
+            _settings = CloneSettings(getSettings());
 
             _indexer.ProgressChanged += OnIndexProgress;
 
+            WireDirtyTracking();
             LoadFromSettings();
             RefreshStatus();
         }
 
+        private void WireDirtyTracking()
+        {
+            HotkeyText.TextChanged += (_, _) => MarkDirty();
+            MaxResultsText.TextChanged += (_, _) => MarkDirty();
+            ScheduleTimeText.TextChanged += (_, _) => MarkDirty();
+            ScheduleEnabledCheck.Click += (_, _) => MarkDirty();
+            RunMissedCheck.Click += (_, _) => MarkDirty();
+            LaunchToTrayCheck.Click += (_, _) => MarkDirty();
+            StartWithWindowsCheck.Click += (_, _) => MarkDirty();
+            ScheduleKindCombo.SelectionChanged += (_, _) => MarkDirty();
+            DayOfWeekCombo.SelectionChanged += (_, _) => MarkDirty();
+        }
+
+        private void MarkDirty()
+        {
+            if (!_suppressDirty)
+                _isDirty = true;
+        }
+
+        private void SyncFromSourceIfClean()
+        {
+            ReloadSettingsFromSource();
+            if (!_isDirty)
+                LoadFromSettings();
+
+            RefreshStatus();
+        }
+
+        private void ReloadSettingsFromSource()
+        {
+            _settings = CloneSettings(_getSettings());
+        }
+
+        private static AppSettings CloneSettings(AppSettings source)
+        {
+            return new AppSettings
+            {
+                ShareRoots = source.ShareRoots.ToList(),
+                Hotkey = source.Hotkey,
+                StartWithWindows = source.StartWithWindows,
+                LaunchToTray = source.LaunchToTray,
+                IndexSchedule = new IndexScheduleSettings
+                {
+                    Enabled = source.IndexSchedule.Enabled,
+                    Kind = source.IndexSchedule.Kind,
+                    DayOfWeek = source.IndexSchedule.DayOfWeek,
+                    TimeOfDay = source.IndexSchedule.TimeOfDay
+                },
+                RunMissedIndexOnStartup = source.RunMissedIndexOnStartup,
+                MaxResults = source.MaxResults,
+                LastSearchShareRoots = source.LastSearchShareRoots.ToList(),
+                LastIndexedAt = source.LastIndexedAt,
+                LastIndexEntryCount = source.LastIndexEntryCount,
+                LastIndexDurationSeconds = source.LastIndexDurationSeconds,
+                LastIndexError = source.LastIndexError
+            };
+        }
+
         private void LoadFromSettings()
         {
-            ShareRootsList.ItemsSource = _settings.ShareRoots.ToList();
-            HotkeyText.Text = _settings.Hotkey;
-            ScheduleEnabledCheck.IsChecked = _settings.IndexSchedule.Enabled;
-            ScheduleKindCombo.SelectedIndex = _settings.IndexSchedule.Kind == IndexScheduleKind.Weekly ? 1 : 0;
-            DayOfWeekCombo.SelectedIndex = (int)_settings.IndexSchedule.DayOfWeek;
-            ScheduleTimeText.Text = AppSettings.FormatScheduleTime(_settings.GetScheduleTimeOfDay());
-            RunMissedCheck.IsChecked = _settings.RunMissedIndexOnStartup;
-            LaunchToTrayCheck.IsChecked = _settings.LaunchToTray;
-            StartWithWindowsCheck.IsChecked = _settings.StartWithWindows;
-            UpdateDayOfWeekVisibility();
+            _suppressDirty = true;
+            try
+            {
+                _isDirty = false;
+                ShareRootsList.ItemsSource = _settings.ShareRoots.ToList();
+                HotkeyText.Text = _settings.Hotkey;
+                MaxResultsText.Text = _settings.MaxResults.ToString();
+                ScheduleEnabledCheck.IsChecked = _settings.IndexSchedule.Enabled;
+                ScheduleKindCombo.SelectedIndex = _settings.IndexSchedule.Kind == IndexScheduleKind.Weekly ? 1 : 0;
+                DayOfWeekCombo.SelectedIndex = (int)_settings.IndexSchedule.DayOfWeek;
+                ScheduleTimeText.Text = AppSettings.FormatScheduleTime(_settings.GetScheduleTimeOfDay());
+                RunMissedCheck.IsChecked = _settings.RunMissedIndexOnStartup;
+                LaunchToTrayCheck.IsChecked = _settings.LaunchToTray;
+                StartWithWindowsCheck.IsChecked = _settings.StartWithWindows;
+                UpdateDayOfWeekVisibility();
+            }
+            finally
+            {
+                _suppressDirty = false;
+            }
         }
 
         private void RefreshStatus()
@@ -126,14 +199,20 @@ namespace Nsqs
         {
             Dispatcher.BeginInvoke(() =>
             {
+                ReloadSettingsFromSource();
+
                 if (progress.IsComplete)
                 {
                     HideIndexProgress();
+                    if (!_isDirty)
+                        LoadFromSettings();
+
                     RefreshStatus();
                     return;
                 }
 
                 ShowIndexProgress(progress);
+                RefreshStatus();
                 RebuildButton.IsEnabled = false;
                 ExportIndexButton.IsEnabled = false;
             });
@@ -199,6 +278,7 @@ namespace Nsqs
             ShareRootsList.ItemsSource = list;
             ShareRootsList.SelectedItem = normalized;
             NewShareText.Text = normalized;
+            MarkDirty();
         }
 
         private void RemoveShare_Click(object sender, RoutedEventArgs e)
@@ -210,6 +290,7 @@ namespace Nsqs
             list.Remove(selected);
             ShareRootsList.ItemsSource = null;
             ShareRootsList.ItemsSource = list;
+            MarkDirty();
         }
 
         private void RebuildButton_Click(object sender, RoutedEventArgs e)
@@ -266,8 +347,26 @@ namespace Nsqs
                 return false;
             }
 
+            var hotkey = HotkeyText.Text.Trim();
+            if (!HotkeyParser.TryParse(hotkey, out _, out _, out var hotkeyError))
+            {
+                System.Windows.MessageBox.Show(this,
+                    hotkeyError ?? "Enter a valid hotkey (e.g. Ctrl+Shift+Space).",
+                    Title, MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+
+            if (!int.TryParse(MaxResultsText.Text.Trim(), out var maxResults) || maxResults < 1 || maxResults > 500)
+            {
+                System.Windows.MessageBox.Show(this,
+                    "Enter max search results between 1 and 500.",
+                    Title, MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+
             _settings.ShareRoots = roots;
-            _settings.Hotkey = HotkeyText.Text.Trim();
+            _settings.Hotkey = hotkey;
+            _settings.MaxResults = maxResults;
             _settings.IndexSchedule.Enabled = ScheduleEnabledCheck.IsChecked == true;
             _settings.IndexSchedule.Kind = ScheduleKindCombo.SelectedIndex == 1
                 ? IndexScheduleKind.Weekly
@@ -277,17 +376,52 @@ namespace Nsqs
             _settings.RunMissedIndexOnStartup = RunMissedCheck.IsChecked == true;
             _settings.LaunchToTray = LaunchToTrayCheck.IsChecked == true;
             _settings.StartWithWindows = StartWithWindowsCheck.IsChecked == true;
+            AppSettings.PruneSearchShareRoots(_settings);
             return true;
         }
 
         private void SaveButton_Click(object sender, RoutedEventArgs e)
         {
+            var previousRoots = _getSettings().ShareRoots.ToList();
+
             if (!ApplyToSettings())
                 return;
 
-            _settings.Save();
+            AppSettingsManager.Save(_settings);
             StartupHelper.SetEnabled(_settings.StartWithWindows);
+
+            var removedRoots = previousRoots
+                .Where(root => !_settings.ShareRoots.Contains(root, StringComparer.OrdinalIgnoreCase))
+                .ToList();
+
+            if (removedRoots.Count > 0 && File.Exists(AppPaths.IndexFile))
+            {
+                try
+                {
+                    var purgeResult = IndexStore.PurgeShareRoots(AppPaths.IndexFile, removedRoots);
+                    if (purgeResult.Removed > 0)
+                    {
+                        Diagnostics.Log($"Purged {purgeResult.Removed} folders from removed share roots.");
+                        _settings = AppSettingsManager.Update(settings =>
+                        {
+                            settings.LastIndexEntryCount = purgeResult.TotalCount;
+                            if (settings.LastIndexEntryCount == 0)
+                                settings.LastIndexedAt = null;
+                        });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.Log($"Failed to purge removed share roots: {ex.Message}");
+                    System.Windows.MessageBox.Show(this,
+                        $"Settings saved, but purging removed shares from the index failed:\n{ex.Message}",
+                        Title, MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+            }
+
             _onSaved();
+            ReloadSettingsFromSource();
+            LoadFromSettings();
             RefreshStatus();
 
             System.Windows.MessageBox.Show(this,
@@ -298,6 +432,12 @@ namespace Nsqs
         private void CloseButton_Click(object sender, RoutedEventArgs e)
         {
             Close();
+        }
+
+        protected override void OnActivated(EventArgs e)
+        {
+            base.OnActivated(e);
+            SyncFromSourceIfClean();
         }
 
         protected override void OnClosed(EventArgs e)
@@ -311,21 +451,21 @@ namespace Nsqs
             bool dark = ThemeHelper.IsSystemDarkTheme();
             if (dark) return;
 
-            Resources["WindowBackgroundBrush"] = new SolidColorBrush(Color.FromRgb(0xF3, 0xF3, 0xF3));
-            Resources["WindowForegroundBrush"] = new SolidColorBrush(Color.FromRgb(0x1A, 0x1A, 0x1A));
-            Resources["SubtleForegroundBrush"] = new SolidColorBrush(Color.FromRgb(0x6B, 0x6B, 0x6B));
-            Resources["CardBackgroundBrush"] = new SolidColorBrush(Colors.White);
-            Resources["ButtonBackgroundBrush"] = new SolidColorBrush(Colors.White);
-            Resources["ButtonHoverBrush"] = new SolidColorBrush(Color.FromRgb(0xED, 0xED, 0xED));
-            Resources["ButtonPressedBrush"] = new SolidColorBrush(Color.FromRgb(0xDC, 0xDC, 0xDC));
-            Resources["ButtonBorderBrush"] = new SolidColorBrush(Color.FromRgb(0xD0, 0xD0, 0xD0));
-            Resources["ControlBackgroundBrush"] = new SolidColorBrush(Colors.White);
-            Resources["ControlBorderBrush"] = new SolidColorBrush(Color.FromRgb(0xD0, 0xD0, 0xD0));
-            Resources["ControlHoverBorderBrush"] = new SolidColorBrush(Color.FromRgb(0xB0, 0xB0, 0xB0));
-            Resources["TrackBackgroundBrush"] = new SolidColorBrush(Color.FromRgb(0xD8, 0xD8, 0xD8));
-            Resources["PopupBackgroundBrush"] = new SolidColorBrush(Colors.White);
-            Resources["ItemHoverBrush"] = new SolidColorBrush(Color.FromRgb(0xE8, 0xE8, 0xE8));
-            Resources["SeparatorBrush"] = new SolidColorBrush(Color.FromRgb(0xDE, 0xDE, 0xDE));
+            ThemeHelper.SetFrozenBrush(Resources, "WindowBackgroundBrush", Color.FromRgb(0xF3, 0xF3, 0xF3));
+            ThemeHelper.SetFrozenBrush(Resources, "WindowForegroundBrush", Color.FromRgb(0x1A, 0x1A, 0x1A));
+            ThemeHelper.SetFrozenBrush(Resources, "SubtleForegroundBrush", Color.FromRgb(0x6B, 0x6B, 0x6B));
+            ThemeHelper.SetFrozenBrush(Resources, "CardBackgroundBrush", Colors.White);
+            ThemeHelper.SetFrozenBrush(Resources, "ButtonBackgroundBrush", Colors.White);
+            ThemeHelper.SetFrozenBrush(Resources, "ButtonHoverBrush", Color.FromRgb(0xED, 0xED, 0xED));
+            ThemeHelper.SetFrozenBrush(Resources, "ButtonPressedBrush", Color.FromRgb(0xDC, 0xDC, 0xDC));
+            ThemeHelper.SetFrozenBrush(Resources, "ButtonBorderBrush", Color.FromRgb(0xD0, 0xD0, 0xD0));
+            ThemeHelper.SetFrozenBrush(Resources, "ControlBackgroundBrush", Colors.White);
+            ThemeHelper.SetFrozenBrush(Resources, "ControlBorderBrush", Color.FromRgb(0xD0, 0xD0, 0xD0));
+            ThemeHelper.SetFrozenBrush(Resources, "ControlHoverBorderBrush", Color.FromRgb(0xB0, 0xB0, 0xB0));
+            ThemeHelper.SetFrozenBrush(Resources, "TrackBackgroundBrush", Color.FromRgb(0xD8, 0xD8, 0xD8));
+            ThemeHelper.SetFrozenBrush(Resources, "PopupBackgroundBrush", Colors.White);
+            ThemeHelper.SetFrozenBrush(Resources, "ItemHoverBrush", Color.FromRgb(0xE8, 0xE8, 0xE8));
+            ThemeHelper.SetFrozenBrush(Resources, "SeparatorBrush", Color.FromRgb(0xDE, 0xDE, 0xDE));
         }
 
         protected override void OnSourceInitialized(EventArgs e)

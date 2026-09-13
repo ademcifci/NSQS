@@ -32,15 +32,13 @@ namespace Nsqs
         private SettingsWindow? _settingsWindow;
         private bool _isExiting;
         private bool _isClosingMainWindowForModeChange;
+        private string? _hotkeyRegistrationError;
 
         protected override void OnStartup(StartupEventArgs e)
         {
             base.OnStartup(e);
 
-            DispatcherUnhandledException += (_, args) =>
-            {
-                Diagnostics.Log($"UNHANDLED (dispatcher): {args.Exception}");
-            };
+            DispatcherUnhandledException += OnDispatcherUnhandledException;
             AppDomain.CurrentDomain.UnhandledException += (_, args) =>
             {
                 Diagnostics.Log($"UNHANDLED (appdomain): {args.ExceptionObject}");
@@ -63,33 +61,36 @@ namespace Nsqs
 
                 ApplySystemAccent();
                 StartupHelper.RepairPathIfEnabled();
-                _settings = AppSettings.Load();
+                _settings = AppSettingsManager.Load();
 
+                IndexFileHelper.CleanupStaleIndexFiles(AppPaths.IndexFile, AppPaths.IndexBuildingFile);
                 EnsureIndexDatabase();
+                if (File.Exists(AppPaths.IndexFile))
+                    IndexStore.ConfigureLiveDatabase(AppPaths.IndexFile);
                 _indexStore.OpenForSearch(AppPaths.IndexFile);
 
                 _indexer.ProgressChanged += OnIndexProgress;
                 _scheduler = new IndexScheduler(
                     _indexer,
                     () => _settings,
-                    PrepareForIndexRebuild,
-                    OnIndexDatabaseSwapped,
+                    RequestRebuildIndex,
                     () => _appLifetimeCts.Token);
 
-                _launcherWindow = new LauncherWindow(_indexStore, _settings);
+                _launcherWindow = new LauncherWindow(() => _settings, () => _indexer.IsRunning);
                 _hotkeyManager = new HotkeyManager();
                 _hotkeyManager.HotkeyPressed += ToggleLauncher;
-                RegisterHotkeyFromSettings();
 
                 ApplyLaunchMode();
                 if (!_settings.LaunchToTray)
                     ShowLauncher();
 
-                _trayIcon = new TrayIconManager(_settings);
+                _trayIcon = new TrayIconManager(() => _settings, OnStartWithWindowsChanged);
                 _trayIcon.LauncherRequested += ActivateLauncherFromExternalRequest;
                 _trayIcon.SettingsRequested += OpenSettings;
                 _trayIcon.RebuildIndexRequested += RequestRebuildIndex;
                 _trayIcon.ExitRequested += ExitApplication;
+
+                RegisterHotkeyFromSettings();
 
                 SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
 
@@ -106,9 +107,26 @@ namespace Nsqs
             }
         }
 
+        private void OnDispatcherUnhandledException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs args)
+        {
+            Diagnostics.Log($"UNHANDLED (dispatcher): {args.Exception}");
+            _trayIcon?.ShowWarning(App.ShortName, "A fatal error occurred. NSQS will exit.");
+            args.Handled = true;
+            Dispatcher.BeginInvoke(ExitApplication);
+        }
+
+        private void PersistIndexMetadata(IndexMetadata metadata) =>
+            _settings = AppSettingsManager.SaveIndexMetadata(metadata);
+
+        private void OnStartWithWindowsChanged(bool enabled)
+        {
+            _settings = AppSettingsManager.Update(settings => settings.StartWithWindows = enabled);
+            StartupHelper.SetEnabled(enabled);
+        }
+
         private void EnsureIndexDatabase()
         {
-            if (!System.IO.File.Exists(AppPaths.IndexFile))
+            if (!File.Exists(AppPaths.IndexFile))
                 IndexStore.InitializeDatabase(AppPaths.IndexFile);
         }
 
@@ -132,8 +150,14 @@ namespace Nsqs
 
         private void StartFolderWatcherIfReady()
         {
-            if (_indexer.IsRunning || _settings.ShareRoots.Count == 0)
+            if (_indexer.IsRunning)
                 return;
+
+            if (_settings.ShareRoots.Count == 0)
+            {
+                StopFolderWatcher();
+                return;
+            }
 
             if (!File.Exists(AppPaths.IndexFile) || !_settings.LastIndexedAt.HasValue)
                 return;
@@ -154,11 +178,7 @@ namespace Nsqs
                 if (_appLifetimeCts.IsCancellationRequested)
                     return;
 
-                if (_indexStore.IsOpen)
-                    _indexStore.Reopen();
-
-                _settings.LastIndexEntryCount = totalCount;
-                _settings.Save();
+                _settings = AppSettingsManager.Update(settings => settings.LastIndexEntryCount = totalCount);
                 UpdateTrayStatus();
             });
         }
@@ -169,12 +189,15 @@ namespace Nsqs
 
             if (_hotkeyManager.TryRegister(_settings.Hotkey, out var error))
             {
+                _hotkeyRegistrationError = null;
                 Diagnostics.Log($"Hotkey registered: {_settings.Hotkey}");
                 return;
             }
 
-            Diagnostics.Log($"Hotkey registration failed: {error}");
-            _trayIcon?.SetStatus($"{ProductName} (hotkey unavailable)");
+            _hotkeyRegistrationError = error ?? "Hotkey unavailable.";
+            Diagnostics.Log($"Hotkey registration failed: {_hotkeyRegistrationError}");
+            _trayIcon?.SetStatus($"{ProductName} (hotkey unavailable)", _hotkeyRegistrationError);
+            _trayIcon?.ShowWarning(App.ShortName, _hotkeyRegistrationError);
         }
 
         private void ToggleLauncher()
@@ -298,9 +321,12 @@ namespace Nsqs
             StopFolderWatcher();
             _indexStore.Close();
             SqliteConnection.ClearAllPools();
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            SqliteConnection.ClearAllPools();
+            _ = Task.Run(() =>
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                SqliteConnection.ClearAllPools();
+            });
             Diagnostics.Log("Released live index locks for rebuild.");
         }
 
@@ -317,34 +343,37 @@ namespace Nsqs
 
             PrepareForIndexRebuild();
             _trayIcon?.SetRebuildEnabled(false);
-            _ = _indexer.RebuildAsync(
-                _settings.ShareRoots,
-                _settings,
-                PrepareForIndexRebuild,
-                _appLifetimeCts.Token).ContinueWith(t =>
+
+            if (!_indexer.TryRebuildAsync(
+                    _settings.ShareRoots,
+                    PersistIndexMetadata,
+                    PrepareForIndexRebuild,
+                    _appLifetimeCts.Token))
             {
-                if (t.IsFaulted && t.Exception != null)
-                    Diagnostics.Log($"Rebuild task faulted: {t.Exception.GetBaseException().Message}");
-
-                Dispatcher.BeginInvoke(() =>
-                {
-                    if (_appLifetimeCts.IsCancellationRequested)
-                        return;
-
-                    EnsureIndexStoreOpen();
-                    _settings = AppSettings.Load();
-                    _trayIcon?.SetRebuildEnabled(true);
-                    UpdateTrayStatus();
-                    StartFolderWatcherIfReady();
-                });
-            }, TaskScheduler.Default);
+                EnsureIndexStoreOpen();
+                _trayIcon?.SetRebuildEnabled(true);
+            }
         }
 
-        private void OnIndexDatabaseSwapped()
+        private void CompleteIndexRebuild(bool succeeded)
         {
-            _indexStore.Close();
-            _indexStore.OpenForSearch(AppPaths.IndexFile);
-            _settings = AppSettings.Load();
+            if (succeeded)
+            {
+                _indexStore.Close();
+                if (File.Exists(AppPaths.IndexFile))
+                {
+                    IndexStore.ConfigureLiveDatabase(AppPaths.IndexFile);
+                    _indexStore.OpenForSearch(AppPaths.IndexFile);
+                }
+            }
+            else
+            {
+                EnsureIndexStoreOpen();
+            }
+
+            _settings = AppSettingsManager.Load();
+            _trayIcon?.SetRebuildEnabled(true);
+            _trayIcon?.RefreshSettings();
             UpdateTrayStatus();
             StartFolderWatcherIfReady();
         }
@@ -357,17 +386,7 @@ namespace Nsqs
                     return;
 
                 if (progress.IsComplete)
-                {
-                    if (!progress.IsFailed)
-                        OnIndexDatabaseSwapped();
-                    else
-                    {
-                        EnsureIndexStoreOpen();
-                        StartFolderWatcherIfReady();
-                    }
-
-                    _trayIcon?.SetRebuildEnabled(true);
-                }
+                    CompleteIndexRebuild(!progress.IsFailed);
 
                 UpdateTrayStatus(progress.IsComplete ? null : progress);
             });
@@ -386,8 +405,23 @@ namespace Nsqs
                 return;
             }
 
+            if (_hotkeyRegistrationError != null)
+            {
+                var baseText = _settings.LastIndexedAt.HasValue
+                    ? $"{ProductName}: {_settings.LastIndexEntryCount:N0} folders"
+                    : $"{ProductName}: no index yet";
+                _trayIcon.SetStatus(baseText, "hotkey unavailable");
+                return;
+            }
+
             if (_settings.LastIndexedAt.HasValue)
             {
+                if (!string.IsNullOrEmpty(_settings.LastIndexError))
+                {
+                    _trayIcon.SetStatus($"{ProductName}: {_settings.LastIndexEntryCount:N0} folders", "warning");
+                    return;
+                }
+
                 _trayIcon.SetStatus($"{ProductName}: {_settings.LastIndexEntryCount:N0} folders — {_settings.Hotkey}");
             }
             else
@@ -410,9 +444,9 @@ namespace Nsqs
         private void ApplySystemAccent()
         {
             var accent = ThemeHelper.GetSystemAccentColor();
-            Resources["AccentBrush"] = new SolidColorBrush(accent);
-            Resources["AccentHoverBrush"] = new SolidColorBrush(ThemeHelper.Lighten(accent, 0.15));
-            Resources["AccentPressedBrush"] = new SolidColorBrush(ThemeHelper.Darken(accent, 0.2));
+            Resources["AccentBrush"] = ThemeHelper.CreateFrozenBrush(accent);
+            Resources["AccentHoverBrush"] = ThemeHelper.CreateFrozenBrush(ThemeHelper.Lighten(accent, 0.15));
+            Resources["AccentPressedBrush"] = ThemeHelper.CreateFrozenBrush(ThemeHelper.Darken(accent, 0.2));
         }
 
         private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
@@ -432,12 +466,14 @@ namespace Nsqs
             }
 
             _settingsWindow = new SettingsWindow(
-                _settings,
+                () => _settings,
                 _indexer,
                 _scheduler!,
                 onSaved: () =>
                 {
-                    _settings = AppSettings.Load();
+                    _settings = AppSettingsManager.Load();
+                    _launcherWindow?.RefreshSettings(_settings);
+                    _trayIcon?.RefreshSettings();
                     RegisterHotkeyFromSettings();
                     _scheduler?.Reschedule();
                     ApplyLaunchMode();
@@ -456,6 +492,10 @@ namespace Nsqs
             _appLifetimeCts.Cancel();
 
             SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+            DispatcherUnhandledException -= OnDispatcherUnhandledException;
+
+            if (_hotkeyManager != null)
+                _hotkeyManager.HotkeyPressed -= ToggleLauncher;
 
             _indexer.ProgressChanged -= OnIndexProgress;
             _folderWatcher?.Dispose();
@@ -475,7 +515,8 @@ namespace Nsqs
             base.OnExit(e);
             Diagnostics.Log("Shutdown complete.");
 
-            // Background NAS work can otherwise keep the process alive briefly after Exit.
+            // Force process exit: background NAS enumeration/watcher threads may not
+            // finish cooperatively before WPF shutdown completes.
             Environment.Exit(0);
         }
     }

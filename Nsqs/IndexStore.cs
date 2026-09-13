@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
+using System.Threading;
 using Microsoft.Data.Sqlite;
 
 namespace Nsqs
@@ -13,8 +15,11 @@ namespace Nsqs
         public required string RootShare { get; init; }
     }
 
+    internal readonly record struct NormalizedFolderEntry(string Name, string Path, string RootShare);
+
     public sealed class IndexStore : IDisposable
     {
+        private const int InsertStatementChunkSize = 100;
         private readonly object _lock = new();
         private SqliteConnection? _connection;
 
@@ -57,7 +62,11 @@ namespace Nsqs
 
         public void Reopen()
         {
-            OpenForSearch(AppPaths.IndexFile);
+            if (_connection == null)
+                return;
+
+            var dbPath = _connection.DataSource;
+            OpenForSearch(dbPath);
         }
 
         public void Close()
@@ -86,6 +95,194 @@ namespace Nsqs
 
             _connection.Dispose();
             _connection = null;
+        }
+
+        public static void ConfigureLiveDatabase(string dbPath)
+        {
+            using var connection = OpenReadWriteConnection(dbPath);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "PRAGMA journal_mode=WAL;";
+            cmd.ExecuteNonQuery();
+        }
+
+        public static void CheckpointLiveDatabase(string dbPath)
+        {
+            if (!File.Exists(dbPath))
+                return;
+
+            try
+            {
+                using var connection = OpenReadWriteConnection(dbPath);
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+                cmd.ExecuteNonQuery();
+            }
+            catch
+            {
+                // Building databases and read-only opens may not support this.
+            }
+        }
+
+        public static IReadOnlyList<FolderEntry> SearchSnapshot(
+            string dbPath,
+            string query,
+            int maxResults,
+            IReadOnlyList<string>? rootShares = null)
+        {
+            using var store = new IndexStore();
+            store.OpenForSearch(dbPath);
+            return store.Search(query, maxResults, rootShares);
+        }
+
+        public static IReadOnlyList<FolderEntry> ReadEntriesForRoots(string dbPath, IReadOnlyList<string> rootShares)
+        {
+            if (!File.Exists(dbPath) || rootShares.Count == 0)
+                return Array.Empty<FolderEntry>();
+
+            var normalizedRoots = NormalizeRootSharesStatic(rootShares);
+            if (normalizedRoots.Count == 0)
+                return Array.Empty<FolderEntry>();
+
+            using var connection = OpenReadOnlyConnection(dbPath);
+            using var cmd = connection.CreateCommand();
+
+            if (normalizedRoots.Count == 1)
+            {
+                cmd.CommandText = """
+                    SELECT name, path, root_share
+                    FROM folders_fts
+                    WHERE root_share = $root0
+                    ORDER BY path;
+                    """;
+                cmd.Parameters.AddWithValue("$root0", normalizedRoots[0]);
+            }
+            else
+            {
+                var placeholders = string.Join(", ", normalizedRoots.Select((_, i) => $"$root{i}"));
+                cmd.CommandText = $"""
+                    SELECT name, path, root_share
+                    FROM folders_fts
+                    WHERE root_share IN ({placeholders})
+                    ORDER BY path;
+                    """;
+                for (int i = 0; i < normalizedRoots.Count; i++)
+                    cmd.Parameters.AddWithValue($"$root{i}", normalizedRoots[i]);
+            }
+
+            var results = new List<FolderEntry>();
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(new FolderEntry
+                {
+                    Name = reader.GetString(0),
+                    Path = reader.GetString(1),
+                    RootShare = reader.GetString(2)
+                });
+            }
+
+            return results;
+        }
+
+        public static IReadOnlyList<string> GetIndexedPathsForRoot(string dbPath, string rootShare)
+        {
+            var normalizedRoot = ShareIndexer.NormalizeUncRoot(rootShare);
+            if (normalizedRoot == null || !File.Exists(dbPath))
+                return Array.Empty<string>();
+
+            using var connection = OpenReadOnlyConnection(dbPath);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT path
+                FROM folders_fts
+                WHERE root_share = $root
+                ORDER BY path;
+                """;
+            cmd.Parameters.AddWithValue("$root", normalizedRoot);
+
+            var paths = new List<string>();
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                paths.Add(reader.GetString(0));
+
+            return paths;
+        }
+
+        public static IncrementalApplyResult PurgeShareRoots(string dbPath, IReadOnlyList<string> removedRoots)
+        {
+            const int maxAttempts = 5;
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                try
+                {
+                    return PurgeShareRootsCore(dbPath, removedRoots);
+                }
+                catch (SqliteException ex) when (attempt < maxAttempts && ex.SqliteErrorCode == 5)
+                {
+                    Thread.Sleep(50 * attempt);
+                }
+            }
+
+            return PurgeShareRootsCore(dbPath, removedRoots);
+        }
+
+        private static IncrementalApplyResult PurgeShareRootsCore(string dbPath, IReadOnlyList<string> removedRoots)
+        {
+            if (!File.Exists(dbPath) || removedRoots.Count == 0)
+                return new IncrementalApplyResult(0, 0, 0);
+
+            var normalizedRoots = new List<string>();
+            foreach (var root in removedRoots)
+            {
+                var normalizedRoot = ShareIndexer.NormalizeUncRoot(root);
+                if (normalizedRoot != null)
+                    normalizedRoots.Add(normalizedRoot);
+            }
+
+            if (normalizedRoots.Count == 0)
+                return new IncrementalApplyResult(0, 0, 0);
+
+            using var connection = OpenReadWriteConnection(dbPath);
+            var removed = 0;
+
+            using (var tx = connection.BeginTransaction())
+            {
+                using var deleteCmd = connection.CreateCommand();
+                deleteCmd.Transaction = tx;
+                deleteCmd.CommandText = "DELETE FROM folders_fts WHERE root_share = $root;";
+                var rootParam = deleteCmd.CreateParameter();
+                rootParam.ParameterName = "$root";
+                deleteCmd.Parameters.Add(rootParam);
+
+                foreach (var root in normalizedRoots)
+                {
+                    rootParam.Value = root;
+                    removed += deleteCmd.ExecuteNonQuery();
+                }
+
+                var total = QueryEntryCount(connection, tx);
+                using (var metaCmd = connection.CreateCommand())
+                {
+                    metaCmd.Transaction = tx;
+                    metaCmd.CommandText = """
+                        INSERT INTO meta (key, value) VALUES ('entry_count', $value)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+                        """;
+                    metaCmd.Parameters.AddWithValue("$value", total.ToString());
+                    metaCmd.ExecuteNonQuery();
+                }
+
+                tx.Commit();
+                return new IncrementalApplyResult(0, removed, total);
+            }
+        }
+
+        internal static string EscapeLikePattern(string value)
+        {
+            return value
+                .Replace("%", "\\%", StringComparison.Ordinal)
+                .Replace("_", "\\_", StringComparison.Ordinal);
         }
 
         public static void InitializeDatabase(string dbPath)
@@ -140,31 +337,72 @@ namespace Nsqs
             {
                 EnsureOpen();
                 using var tx = _connection!.BeginTransaction();
-                using var cmd = _connection.CreateCommand();
-                cmd.Transaction = tx;
-                cmd.CommandText = """
-                    INSERT INTO folders_fts (name, path, root_share)
-                    VALUES ($name, $path, $root);
-                    """;
-                var nameParam = cmd.CreateParameter();
-                nameParam.ParameterName = "$name";
-                cmd.Parameters.Add(nameParam);
-                var pathParam = cmd.CreateParameter();
-                pathParam.ParameterName = "$path";
-                cmd.Parameters.Add(pathParam);
-                var rootParam = cmd.CreateParameter();
-                rootParam.ParameterName = "$root";
-                cmd.Parameters.Add(rootParam);
+                InsertFolderEntries(_connection, tx, batch);
+                tx.Commit();
+            }
+        }
 
-                foreach (var entry in batch)
+        internal static void InsertFolderEntries(
+            SqliteConnection connection,
+            SqliteTransaction tx,
+            IReadOnlyList<FolderEntry> entries)
+        {
+            if (entries.Count == 0)
+                return;
+
+            var normalized = new List<NormalizedFolderEntry>(entries.Count);
+            foreach (var entry in entries)
+            {
+                if (NormalizeDirectoryPath(entry.Path) == null)
+                    continue;
+
+                var root = ShareIndexer.NormalizeUncRoot(entry.RootShare);
+                if (root == null)
+                    continue;
+
+                normalized.Add(new NormalizedFolderEntry(entry.Name, entry.Path, root));
+            }
+
+            InsertNormalizedFolderEntries(connection, tx, normalized);
+        }
+
+        internal static void InsertNormalizedFolderEntries(
+            SqliteConnection connection,
+            SqliteTransaction tx,
+            IReadOnlyList<NormalizedFolderEntry> entries)
+        {
+            if (entries.Count == 0)
+                return;
+
+            for (int offset = 0; offset < entries.Count; offset += InsertStatementChunkSize)
+            {
+                var chunkSize = Math.Min(InsertStatementChunkSize, entries.Count - offset);
+                using var cmd = connection.CreateCommand();
+                cmd.Transaction = tx;
+
+                var sql = new StringBuilder(
+                    "INSERT INTO folders_fts (name, path, root_share) VALUES ");
+
+                for (int i = 0; i < chunkSize; i++)
                 {
-                    nameParam.Value = entry.Name;
-                    pathParam.Value = entry.Path;
-                    rootParam.Value = entry.RootShare;
-                    cmd.ExecuteNonQuery();
+                    if (i > 0)
+                        sql.Append(',');
+
+                    sql.Append("($n").Append(i).Append(", $p").Append(i).Append(", $r").Append(i).Append(')');
                 }
 
-                tx.Commit();
+                sql.Append(';');
+                cmd.CommandText = sql.ToString();
+
+                for (int i = 0; i < chunkSize; i++)
+                {
+                    var entry = entries[offset + i];
+                    cmd.Parameters.AddWithValue("$n" + i, entry.Name);
+                    cmd.Parameters.AddWithValue("$p" + i, entry.Path);
+                    cmd.Parameters.AddWithValue("$r" + i, entry.RootShare);
+                }
+
+                cmd.ExecuteNonQuery();
             }
         }
 
@@ -196,6 +434,28 @@ namespace Nsqs
         public readonly record struct IncrementalApplyResult(int Added, int Removed, int TotalCount);
 
         public static IncrementalApplyResult ApplyIncrementalChanges(
+            string dbPath,
+            IReadOnlyList<FolderEntry> additions,
+            IReadOnlyList<string> removedDirectoryPaths)
+        {
+            const int maxAttempts = 5;
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                try
+                {
+                    return ApplyIncrementalChangesCore(dbPath, additions, removedDirectoryPaths);
+                }
+                catch (SqliteException ex) when (attempt < maxAttempts && ex.SqliteErrorCode == 5)
+                {
+                    Thread.Sleep(50 * attempt);
+                }
+            }
+
+            return ApplyIncrementalChangesCore(dbPath, additions, removedDirectoryPaths);
+        }
+
+        private static IncrementalApplyResult ApplyIncrementalChangesCore(
             string dbPath,
             IReadOnlyList<FolderEntry> additions,
             IReadOnlyList<string> removedDirectoryPaths)
@@ -236,7 +496,7 @@ namespace Nsqs
                             continue;
 
                         pathParam.Value = normalized;
-                        prefixParam.Value = normalized.TrimEnd('\\') + "\\%";
+                        prefixParam.Value = EscapeLikePattern(normalized.TrimEnd('\\')) + "\\%";
                         removed += deleteCmd.ExecuteNonQuery();
                     }
                 }
@@ -249,21 +509,7 @@ namespace Nsqs
                     existsParam.ParameterName = "$path";
                     existsCmd.Parameters.Add(existsParam);
 
-                    using var insertCmd = connection.CreateCommand();
-                    insertCmd.Transaction = tx;
-                    insertCmd.CommandText = """
-                        INSERT INTO folders_fts (name, path, root_share)
-                        VALUES ($name, $path, $root);
-                        """;
-                    var nameParam = insertCmd.CreateParameter();
-                    nameParam.ParameterName = "$name";
-                    insertCmd.Parameters.Add(nameParam);
-                    var pathParam = insertCmd.CreateParameter();
-                    pathParam.ParameterName = "$path";
-                    insertCmd.Parameters.Add(pathParam);
-                    var rootParam = insertCmd.CreateParameter();
-                    rootParam.ParameterName = "$root";
-                    insertCmd.Parameters.Add(rootParam);
+                    var newEntries = new List<NormalizedFolderEntry>(additions.Count);
 
                     foreach (var entry in additions)
                     {
@@ -276,11 +522,13 @@ namespace Nsqs
                         if (existsCmd.ExecuteScalar() != null)
                             continue;
 
-                        nameParam.Value = entry.Name;
-                        pathParam.Value = normalizedPath;
-                        rootParam.Value = normalizedRoot;
-                        insertCmd.ExecuteNonQuery();
-                        added++;
+                        newEntries.Add(new NormalizedFolderEntry(entry.Name, normalizedPath, normalizedRoot));
+                    }
+
+                    if (newEntries.Count > 0)
+                    {
+                        InsertNormalizedFolderEntries(connection, tx, newEntries);
+                        added = newEntries.Count;
                     }
                 }
 
@@ -313,12 +561,18 @@ namespace Nsqs
             return trimmed.TrimEnd('\\');
         }
 
-        private static SqliteConnection OpenReadWriteConnection(string dbPath)
+        private static SqliteConnection OpenReadWriteConnection(string dbPath) =>
+            OpenConnection(dbPath, SqliteOpenMode.ReadWrite);
+
+        private static SqliteConnection OpenReadOnlyConnection(string dbPath) =>
+            OpenConnection(dbPath, SqliteOpenMode.ReadOnly);
+
+        private static SqliteConnection OpenConnection(string dbPath, SqliteOpenMode mode)
         {
             var builder = new SqliteConnectionStringBuilder
             {
                 DataSource = dbPath,
-                Mode = SqliteOpenMode.ReadWrite,
+                Mode = mode,
                 Cache = SqliteCacheMode.Default
             };
 
@@ -396,6 +650,9 @@ namespace Nsqs
 
         internal static string EscapeCsv(string value)
         {
+            if (value.Length > 0 && "=+-@".Contains(value[0]))
+                value = "'" + value;
+
             if (value.Contains('"'))
                 value = value.Replace("\"", "\"\"");
 
@@ -472,20 +729,23 @@ namespace Nsqs
             }
         }
 
-        private static List<string> NormalizeRootShares(IReadOnlyList<string>? rootShares)
+        private static List<string> NormalizeRootShares(IReadOnlyList<string>? rootShares) =>
+            NormalizeRootSharesStatic(rootShares);
+
+        private static List<string> NormalizeRootSharesStatic(IReadOnlyList<string>? rootShares)
         {
             if (rootShares == null || rootShares.Count == 0)
                 return new List<string>();
 
-            var normalized = new List<string>(rootShares.Count);
+            var normalized = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var root in rootShares)
             {
                 var path = ShareIndexer.NormalizeUncRoot(root);
-                if (path != null && !normalized.Contains(path, StringComparer.OrdinalIgnoreCase))
+                if (path != null)
                     normalized.Add(path);
             }
 
-            return normalized;
+            return normalized.ToList();
         }
 
         internal static string BuildFtsQuery(string userInput)
@@ -497,7 +757,7 @@ namespace Nsqs
             var parts = new List<string>(tokens.Length);
             foreach (var token in tokens)
             {
-                var cleaned = token.Replace("\"", string.Empty);
+                var cleaned = SanitizeFtsToken(token);
                 if (string.IsNullOrEmpty(cleaned))
                     continue;
 
@@ -505,6 +765,24 @@ namespace Nsqs
             }
 
             return parts.Count == 0 ? string.Empty : string.Join(" AND ", parts);
+        }
+
+        internal static string SanitizeFtsToken(string token)
+        {
+            if (string.IsNullOrWhiteSpace(token))
+                return string.Empty;
+
+            var chars = token.Where(c =>
+                c != '"' &&
+                c != '*' &&
+                c != '(' &&
+                c != ')' &&
+                c != ':' &&
+                c != '-' &&
+                c != '^' &&
+                c != '+').ToArray();
+
+            return new string(chars).Trim();
         }
 
         private void EnsureOpen()

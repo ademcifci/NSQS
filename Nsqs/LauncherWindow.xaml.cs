@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -41,20 +42,25 @@ namespace Nsqs
 
     public partial class LauncherWindow : Window
     {
-        private readonly IndexStore _indexStore;
+        private readonly Func<AppSettings> _getSettings;
+        private readonly Func<bool>? _isIndexerRunning;
         private AppSettings _settings;
         private readonly ObservableCollection<FolderEntry> _results = new();
         private readonly ObservableCollection<ShareFilterItem> _shareFilters = new();
         private readonly DispatcherTimer _searchTimer = new();
+        private readonly DispatcherTimer _filterSaveTimer = new();
         private int _selectedIndex;
+        private int _searchGeneration;
         private bool _suppressDeactivateHide;
+        private bool? _appliedDarkTheme;
         private ShareFilterItem? _focusedFilterItem;
 
-        public LauncherWindow(IndexStore indexStore, AppSettings settings)
+        public LauncherWindow(Func<AppSettings> getSettings, Func<bool>? isIndexerRunning = null)
         {
             InitializeComponent();
-            _indexStore = indexStore;
-            _settings = settings;
+            _getSettings = getSettings;
+            _isIndexerRunning = isIndexerRunning;
+            _settings = getSettings();
 
             Icon = IconFactory.CreateWindowIconSource();
             AppIconImage.Source = Icon;
@@ -65,13 +71,31 @@ namespace Nsqs
             _searchTimer.Tick += (_, _) =>
             {
                 _searchTimer.Stop();
-                RunSearch();
+                _ = RunSearchAsync();
             };
+
+            _filterSaveTimer.Interval = TimeSpan.FromMilliseconds(300);
+            _filterSaveTimer.Tick += (_, _) =>
+            {
+                _filterSaveTimer.Stop();
+                SaveSelectedShareFilters();
+            };
+
+            Closed += (_, _) =>
+            {
+                _searchTimer.Stop();
+                _filterSaveTimer.Stop();
+            };
+        }
+
+        public void RefreshSettings(AppSettings settings)
+        {
+            _settings = settings;
         }
 
         public void ShowLauncher()
         {
-            _settings = AppSettings.Load();
+            _settings = _getSettings();
             ApplyTheme();
             LoadShareFilters();
             SearchBox.Text = string.Empty;
@@ -151,11 +175,11 @@ namespace Nsqs
 
         private void ShareFilter_Changed(object sender, RoutedEventArgs e)
         {
-            SaveSelectedShareFilters();
+            ScheduleFilterSave();
             UpdateFilterDisplay();
 
             if (!string.IsNullOrWhiteSpace(SearchBox.Text))
-                RunSearch();
+                _ = RunSearchAsync();
         }
 
         private void FilterDropdown_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -353,11 +377,11 @@ namespace Nsqs
                 return;
 
             item.IsSelected = !item.IsSelected;
-            SaveSelectedShareFilters();
+            ScheduleFilterSave();
             UpdateFilterDisplay();
 
             if (!string.IsNullOrWhiteSpace(SearchBox.Text))
-                RunSearch();
+                _ = RunSearchAsync();
         }
 
         private void ShareFilterPill_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -397,7 +421,7 @@ namespace Nsqs
             UpdateFilterDisplay();
 
             if (!string.IsNullOrWhiteSpace(SearchBox.Text))
-                RunSearch();
+                _ = RunSearchAsync();
 
             FilterDropdown.Focus();
         }
@@ -417,16 +441,26 @@ namespace Nsqs
 
         private void SaveSelectedShareFilters()
         {
-            _settings.LastSearchShareRoots = _shareFilters
+            var selected = _shareFilters
                 .Where(f => f.IsSelected)
                 .Select(f => f.RootPath)
                 .ToList();
 
+            AppSettingsManager.Update(settings =>
+            {
+                settings.LastSearchShareRoots = selected;
 #pragma warning disable CS0618
-            _settings.LastSearchShareRoot = string.Empty;
+                settings.LastSearchShareRoot = string.Empty;
 #pragma warning restore CS0618
+            });
 
-            _settings.Save();
+            _settings = _getSettings();
+        }
+
+        private void ScheduleFilterSave()
+        {
+            _filterSaveTimer.Stop();
+            _filterSaveTimer.Start();
         }
 
         private void UpdateFilterDisplay()
@@ -450,6 +484,10 @@ namespace Nsqs
         private void ApplyTheme()
         {
             bool dark = ThemeHelper.IsSystemDarkTheme();
+            if (_appliedDarkTheme == dark)
+                return;
+
+            _appliedDarkTheme = dark;
             var bg = dark ? Color.FromArgb(245, 0x20, 0x20, 0x20) : Color.FromArgb(250, 0xF3, 0xF3, 0xF3);
             var fg = dark ? Colors.White : Color.FromRgb(0x1A, 0x1A, 0x1A);
             var subtle = dark ? Color.FromRgb(0xBD, 0xBD, 0xBD) : Color.FromRgb(0x52, 0x52, 0x52);
@@ -463,22 +501,22 @@ namespace Nsqs
             var checkboxBorder = dark ? Color.FromRgb(0xAD, 0xAD, 0xAD) : Color.FromRgb(0x76, 0x76, 0x76);
             var listFocus = dark ? Color.FromArgb(68, 255, 255, 255) : Color.FromArgb(40, 0, 0, 0);
 
-            RootBorder.Background = new SolidColorBrush(bg);
-            RootBorder.BorderBrush = new SolidColorBrush(controlBorder);
-            SearchBox.Foreground = new SolidColorBrush(fg);
-            SearchBox.CaretBrush = new SolidColorBrush(fg);
-            HintText.Foreground = new SolidColorBrush(subtle);
-            Resources["ResultHoverBrush"] = new SolidColorBrush(hover);
-            Resources["ResultForegroundBrush"] = new SolidColorBrush(fg);
-            Resources["ResultSubtleBrush"] = new SolidColorBrush(subtle);
-            Resources["LauncherControlBackgroundBrush"] = new SolidColorBrush(controlBg);
-            Resources["LauncherControlBorderBrush"] = new SolidColorBrush(controlBorder);
-            Resources["FilterPillBackgroundBrush"] = new SolidColorBrush(pillBg);
-            Resources["FilterPillBorderBrush"] = new SolidColorBrush(pillBorder);
-            Resources["FilterPillForegroundBrush"] = new SolidColorBrush(pillFg);
-            Resources["FilterPillRemoveBrush"] = new SolidColorBrush(pillRemove);
-            Resources["FilterCheckboxBorderBrush"] = new SolidColorBrush(checkboxBorder);
-            Resources["FilterListFocusBrush"] = new SolidColorBrush(listFocus);
+            RootBorder.Background = ThemeHelper.CreateFrozenBrush(bg);
+            RootBorder.BorderBrush = ThemeHelper.CreateFrozenBrush(controlBorder);
+            SearchBox.Foreground = ThemeHelper.CreateFrozenBrush(fg);
+            SearchBox.CaretBrush = ThemeHelper.CreateFrozenBrush(fg);
+            HintText.Foreground = ThemeHelper.CreateFrozenBrush(subtle);
+            Resources["ResultHoverBrush"] = ThemeHelper.CreateFrozenBrush(hover);
+            Resources["ResultForegroundBrush"] = ThemeHelper.CreateFrozenBrush(fg);
+            Resources["ResultSubtleBrush"] = ThemeHelper.CreateFrozenBrush(subtle);
+            Resources["LauncherControlBackgroundBrush"] = ThemeHelper.CreateFrozenBrush(controlBg);
+            Resources["LauncherControlBorderBrush"] = ThemeHelper.CreateFrozenBrush(controlBorder);
+            Resources["FilterPillBackgroundBrush"] = ThemeHelper.CreateFrozenBrush(pillBg);
+            Resources["FilterPillBorderBrush"] = ThemeHelper.CreateFrozenBrush(pillBorder);
+            Resources["FilterPillForegroundBrush"] = ThemeHelper.CreateFrozenBrush(pillFg);
+            Resources["FilterPillRemoveBrush"] = ThemeHelper.CreateFrozenBrush(pillRemove);
+            Resources["FilterCheckboxBorderBrush"] = ThemeHelper.CreateFrozenBrush(checkboxBorder);
+            Resources["FilterListFocusBrush"] = ThemeHelper.CreateFrozenBrush(listFocus);
 
             try
             {
@@ -486,16 +524,18 @@ namespace Nsqs
             }
             catch
             {
-                Resources["AccentBrush"] = new SolidColorBrush(ThemeHelper.GetSystemAccentColor());
+                Resources["AccentBrush"] = ThemeHelper.CreateFrozenBrush(ThemeHelper.GetSystemAccentColor());
             }
 
             var accentColor = ((SolidColorBrush)Resources["AccentBrush"]).Color;
             var dropdownFocus = Color.FromArgb(dark ? (byte)72 : (byte)48, accentColor.R, accentColor.G, accentColor.B);
-            Resources["FilterDropdownFocusBrush"] = new SolidColorBrush(dropdownFocus);
+            Resources["FilterDropdownFocusBrush"] = ThemeHelper.CreateFrozenBrush(dropdownFocus);
         }
 
         private void FadeTo(double target, Action? onComplete = null)
         {
+            BeginAnimation(OpacityProperty, null);
+
             var animation = new System.Windows.Media.Animation.DoubleAnimation(target, TimeSpan.FromMilliseconds(120))
             {
                 EasingFunction = new System.Windows.Media.Animation.QuadraticEase()
@@ -512,21 +552,46 @@ namespace Nsqs
             _searchTimer.Start();
         }
 
-        private void RunSearch()
+        private async Task RunSearchAsync()
         {
             var query = SearchBox.Text.Trim();
+            var generation = ++_searchGeneration;
+
             _results.Clear();
             _selectedIndex = -1;
 
-            if (query.Length == 0 || !_indexStore.IsOpen)
+            if (query.Length == 0 || !File.Exists(AppPaths.IndexFile))
             {
                 UpdateResultState(hasQuery: false, resultCount: 0);
                 return;
             }
 
+            if (_isIndexerRunning?.Invoke() == true)
+            {
+                _results.Clear();
+                _selectedIndex = -1;
+                EmptyStateText.Text = "Index is rebuilding…";
+                EmptyStateText.Visibility = Visibility.Visible;
+                ResultCountText.Text = string.Empty;
+                ExportResultsButton.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            UpdateResultState(hasQuery: true, resultCount: 0);
+            EmptyStateText.Text = "Searching…";
+            EmptyStateText.Visibility = Visibility.Visible;
+
             try
             {
-                foreach (var entry in _indexStore.Search(query, _settings.MaxResults, GetSelectedShareRoots()))
+                var maxResults = _settings.MaxResults;
+                var roots = GetSelectedShareRoots()?.ToList();
+                var results = await Task.Run(() =>
+                    IndexStore.SearchSnapshot(AppPaths.IndexFile, query, maxResults, roots));
+
+                if (generation != _searchGeneration)
+                    return;
+
+                foreach (var entry in results)
                     _results.Add(entry);
 
                 if (_results.Count > 0)
@@ -539,6 +604,9 @@ namespace Nsqs
             }
             catch (Exception ex)
             {
+                if (generation != _searchGeneration)
+                    return;
+
                 Diagnostics.Log($"Search failed: {ex.Message}");
                 EmptyStateText.Text = "Search failed";
                 EmptyStateText.Visibility = Visibility.Visible;
@@ -719,6 +787,12 @@ namespace Nsqs
         {
             if (ResultsList.SelectedItem is not FolderEntry entry)
                 return;
+
+            if (!SharePathHelper.IsSafeIndexedPath(entry, _settings.ShareRoots))
+            {
+                Diagnostics.Log($"Blocked opening unsafe path: {entry.Path}");
+                return;
+            }
 
             try
             {

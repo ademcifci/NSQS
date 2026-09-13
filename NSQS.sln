@@ -5,6 +5,8 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Nsqs", "Nsqs\Nsqs.csproj", "{A8F3C2E1-4B5D-4E9A-9C1F-2D8E7A6B5C4D}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Nsqs.Tests", "Nsqs.Tests\Nsqs.Tests.csproj", "{B9E4D3F2-5C6E-4F0B-8D2E-3E9F8B7C6D5E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -15,5 +17,9 @@ Global
 		{A8F3C2E1-4B5D-4E9A-9C1F-2D8E7A6B5C4D}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A8F3C2E1-4B5D-4E9A-9C1F-2D8E7A6B5C4D}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{A8F3C2E1-4B5D-4E9A-9C1F-2D8E7A6B5C4D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B9E4D3F2-5C6E-4F0B-8D2E-3E9F8B7C6D5E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B9E4D3F2-5C6E-4F0B-8D2E-3E9F8B7C6D5E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B9E4D3F2-5C6E-4F0B-8D2E-3E9F8B7C6D5E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B9E4D3F2-5C6E-4F0B-8D2E-3E9F8B7C6D5E}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

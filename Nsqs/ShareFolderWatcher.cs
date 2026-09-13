@@ -9,62 +9,80 @@ namespace Nsqs
     public sealed class ShareFolderWatcher : IDisposable
     {
         private const int FlushDelayMs = 2000;
+        private const int FlushRetryDelayMs = 5000;
         private const int WatcherBufferBytes = 65536;
+        private const int PeriodicReconcileHours = 6;
 
         private readonly object _lock = new();
         private readonly HashSet<string> _pendingAdds = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _pendingRemoves = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _pendingFullReconcileRoots = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _pendingLightweightReconcileRoots = new(StringComparer.OrdinalIgnoreCase);
         private readonly List<FileSystemWatcher> _watchers = new();
         private readonly List<string> _shareRoots = new();
 
         private Timer? _flushTimer;
+        private Timer? _restartTimer;
+        private Timer? _periodicReconcileTimer;
         private Action<int>? _onIndexChanged;
         private bool _disposed;
+        private int _errorRestartCount;
+        private int _operationGeneration;
+        private int _periodicReconcileRootIndex;
 
         public void Start(IReadOnlyList<string> shareRoots, Action<int> onIndexChanged)
         {
             lock (_lock)
             {
-                StopLocked();
+                StopWatchersLocked(clearPending: false);
                 _onIndexChanged = onIndexChanged;
-
-                foreach (var root in shareRoots.Distinct(StringComparer.OrdinalIgnoreCase))
-                {
-                    var normalizedRoot = ShareIndexer.NormalizeUncRoot(root);
-                    if (normalizedRoot == null)
-                        continue;
-
-                    if (!Directory.Exists(normalizedRoot))
-                    {
-                        Diagnostics.Log($"Share watch skipped (not reachable): {normalizedRoot}");
-                        continue;
-                    }
-
-                    try
-                    {
-                        var watcher = CreateWatcher(normalizedRoot);
-                        _watchers.Add(watcher);
-                        _shareRoots.Add(normalizedRoot);
-                        watcher.EnableRaisingEvents = true;
-                        Diagnostics.Log($"Watching share for folder changes: {normalizedRoot}");
-                    }
-                    catch (Exception ex)
-                    {
-                        Diagnostics.Log($"Share watch failed for {normalizedRoot}: {ex.Message}");
-                    }
-                }
+                _errorRestartCount = 0;
+                _periodicReconcileRootIndex = 0;
+                AttachWatchers(shareRoots);
+                SchedulePeriodicReconcileLocked();
             }
         }
 
         public void Stop()
         {
             lock (_lock)
-                StopLocked();
+                StopWatchersLocked(clearPending: true);
         }
 
         public void Restart(IReadOnlyList<string> shareRoots, Action<int> onIndexChanged)
         {
             Start(shareRoots, onIndexChanged);
+        }
+
+        private void AttachWatchers(IReadOnlyList<string> shareRoots)
+        {
+            _shareRoots.Clear();
+
+            foreach (var root in shareRoots.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                var normalizedRoot = ShareIndexer.NormalizeUncRoot(root);
+                if (normalizedRoot == null)
+                    continue;
+
+                if (!Directory.Exists(normalizedRoot))
+                {
+                    Diagnostics.Log($"Share watch skipped (not reachable): {normalizedRoot}");
+                    continue;
+                }
+
+                try
+                {
+                    var watcher = CreateWatcher(normalizedRoot);
+                    _watchers.Add(watcher);
+                    _shareRoots.Add(normalizedRoot);
+                    watcher.EnableRaisingEvents = true;
+                    Diagnostics.Log($"Watching share for folder changes: {normalizedRoot}");
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.Log($"Share watch failed for {normalizedRoot}: {ex.Message}");
+                }
+            }
         }
 
         private FileSystemWatcher CreateWatcher(string normalizedRoot)
@@ -118,18 +136,71 @@ namespace Nsqs
                 if (_disposed || _onIndexChanged == null)
                     return;
 
-                var roots = _shareRoots.ToList();
+                foreach (var root in _shareRoots)
+                    _pendingFullReconcileRoots.Add(root);
+
+                _errorRestartCount++;
+                ScheduleWatcherRestartLocked();
+            }
+        }
+
+        private void ScheduleWatcherRestartLocked()
+        {
+            _restartTimer?.Dispose();
+            var delay = TimeSpan.FromSeconds(Math.Min(30, Math.Pow(2, Math.Min(_errorRestartCount, 5))));
+            _restartTimer = new Timer(_ => RestartWatchersPreservePending(), null, delay, Timeout.InfiniteTimeSpan);
+        }
+
+        private void SchedulePeriodicReconcileLocked()
+        {
+            _periodicReconcileTimer?.Dispose();
+            if (_shareRoots.Count == 0)
+                return;
+
+            _periodicReconcileTimer = new Timer(
+                _ => QueuePeriodicReconcile(),
+                null,
+                TimeSpan.FromHours(PeriodicReconcileHours),
+                TimeSpan.FromHours(PeriodicReconcileHours));
+        }
+
+        private void QueuePeriodicReconcile()
+        {
+            lock (_lock)
+            {
+                if (_disposed || _onIndexChanged == null || _shareRoots.Count == 0)
+                    return;
+
+                var root = _shareRoots[_periodicReconcileRootIndex % _shareRoots.Count];
+                _periodicReconcileRootIndex++;
+                _pendingLightweightReconcileRoots.Add(root);
+                ScheduleFlushLocked();
+                Diagnostics.Log($"Scheduled lightweight index validate for {root}");
+            }
+        }
+
+        private void RestartWatchersPreservePending()
+        {
+            lock (_lock)
+            {
+                if (_disposed || _onIndexChanged == null)
+                    return;
+
+                var roots = _shareRoots.Count > 0
+                    ? _shareRoots.ToList()
+                    : _pendingFullReconcileRoots.Concat(_pendingLightweightReconcileRoots).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                 var callback = _onIndexChanged;
-                StopLocked();
-                Start(roots, callback);
+
+                StopWatchersLocked(clearPending: false);
+                AttachWatchers(roots);
+                _onIndexChanged = callback;
+                SchedulePeriodicReconcileLocked();
+                ScheduleFlushLocked();
             }
         }
 
         private void QueueAdd(string path)
         {
-            if (!Directory.Exists(path))
-                return;
-
             lock (_lock)
             {
                 if (_disposed || _onIndexChanged == null)
@@ -164,94 +235,168 @@ namespace Nsqs
 
         private void ScheduleFlushLocked()
         {
-            _flushTimer ??= new Timer(_ => FlushPendingChanges(), null, FlushDelayMs, Timeout.Infinite);
+            _flushTimer ??= new Timer(_ => FlushPendingChanges(), null, Timeout.Infinite, Timeout.Infinite);
             _flushTimer.Change(FlushDelayMs, Timeout.Infinite);
+        }
+
+        private void ScheduleFlushRetryLocked()
+        {
+            _flushTimer ??= new Timer(_ => FlushPendingChanges(), null, Timeout.Infinite, Timeout.Infinite);
+            _flushTimer.Change(FlushRetryDelayMs, Timeout.Infinite);
         }
 
         private void FlushPendingChanges()
         {
             List<string> adds;
             List<string> removes;
+            List<string> fullReconcileRoots;
+            List<string> lightweightReconcileRoots;
             IReadOnlyList<string> roots;
             Action<int>? callback;
+            int generation;
 
             lock (_lock)
             {
                 if (_disposed || _onIndexChanged == null)
                     return;
 
-                if (_pendingAdds.Count == 0 && _pendingRemoves.Count == 0)
+                if (_pendingAdds.Count == 0 &&
+                    _pendingRemoves.Count == 0 &&
+                    _pendingFullReconcileRoots.Count == 0 &&
+                    _pendingLightweightReconcileRoots.Count == 0)
                     return;
 
                 adds = _pendingAdds.ToList();
                 removes = _pendingRemoves.ToList();
+                fullReconcileRoots = _pendingFullReconcileRoots.ToList();
+                lightweightReconcileRoots = _pendingLightweightReconcileRoots.ToList();
                 roots = _shareRoots.ToList();
                 callback = _onIndexChanged;
+                generation = _operationGeneration;
 
                 _pendingAdds.Clear();
                 _pendingRemoves.Clear();
+                _pendingFullReconcileRoots.Clear();
+                _pendingLightweightReconcileRoots.Clear();
             }
 
             try
             {
-                var additions = new List<FolderEntry>(adds.Count);
+                var additions = new List<FolderEntry>();
+                var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
                 foreach (var path in adds)
                 {
-                    if (!Directory.Exists(path))
-                        continue;
-
-                    var rootShare = FindRootShare(path, roots);
+                    var rootShare = SharePathHelper.FindRootShare(path, roots);
                     if (rootShare == null)
                         continue;
 
-                    var name = Path.GetFileName(path.TrimEnd('\\'));
-                    if (string.IsNullOrEmpty(name))
-                        continue;
-
-                    additions.Add(new FolderEntry
+                    foreach (var entry in ShareIndexer.EnumerateDirectoryEntries(path, rootShare))
                     {
-                        Name = name,
-                        Path = path,
-                        RootShare = rootShare
-                    });
+                        if (seenPaths.Add(entry.Path))
+                            additions.Add(entry);
+                    }
                 }
 
-                var result = IndexStore.ApplyIncrementalChanges(AppPaths.IndexFile, additions, removes);
-                if (result.Added == 0 && result.Removed == 0)
-                    return;
+                foreach (var root in lightweightReconcileRoots)
+                {
+                    if (!Directory.Exists(root))
+                        continue;
 
-                Diagnostics.Log(
-                    $"Index updated from share watch: +{result.Added}, -{result.Removed}, total {result.TotalCount:N0}");
-                callback(result.TotalCount);
+                    var indexedPaths = IndexStore.GetIndexedPathsForRoot(AppPaths.IndexFile, root);
+                    ShareWatchReconciler.CollectStalePaths(indexedPaths, removes);
+                }
+
+                foreach (var root in fullReconcileRoots)
+                {
+                    if (!Directory.Exists(root))
+                        continue;
+
+                    var indexedPaths = IndexStore.GetIndexedPathsForRoot(AppPaths.IndexFile, root);
+                    ShareWatchReconciler.CollectChanges(
+                        ShareIndexer.EnumerateDirectoryEntries(root, root),
+                        indexedPaths,
+                        seenPaths,
+                        additions,
+                        removes);
+                }
+
+                if (!TryCommitFlush(generation, additions, removes, callback))
+                    RequeueFailedFlush(adds, removes, fullReconcileRoots, lightweightReconcileRoots);
             }
             catch (Exception ex)
             {
                 Diagnostics.Log($"Share folder watch flush failed: {ex.Message}");
+                RequeueFailedFlush(adds, removes, fullReconcileRoots, lightweightReconcileRoots);
             }
         }
 
-        private static string? FindRootShare(string path, IReadOnlyList<string> roots)
+        private bool TryCommitFlush(
+            int generation,
+            List<FolderEntry> additions,
+            List<string> removes,
+            Action<int>? callback)
         {
-            string? best = null;
-
-            foreach (var root in roots)
+            lock (_lock)
             {
-                if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                if (best == null || root.Length > best.Length)
-                    best = root;
+                if (_disposed || _onIndexChanged == null || generation != _operationGeneration)
+                    return false;
             }
 
-            return best;
+            var result = IndexStore.ApplyIncrementalChanges(AppPaths.IndexFile, additions, removes);
+            if (result.Added == 0 && result.Removed == 0)
+                return true;
+
+            Diagnostics.Log(
+                $"Index updated from share watch: +{result.Added}, -{result.Removed}, total {result.TotalCount:N0}");
+            callback?.Invoke(result.TotalCount);
+            return true;
         }
 
-        private void StopLocked()
+        private void RequeueFailedFlush(
+            IReadOnlyList<string> adds,
+            IReadOnlyList<string> removes,
+            IReadOnlyList<string> fullReconcileRoots,
+            IReadOnlyList<string> lightweightReconcileRoots)
         {
+            lock (_lock)
+            {
+                if (_disposed || _onIndexChanged == null)
+                    return;
+
+                foreach (var path in adds)
+                    _pendingAdds.Add(path);
+
+                foreach (var path in removes)
+                    _pendingRemoves.Add(path);
+
+                foreach (var root in fullReconcileRoots)
+                    _pendingFullReconcileRoots.Add(root);
+
+                foreach (var root in lightweightReconcileRoots)
+                    _pendingLightweightReconcileRoots.Add(root);
+
+                ScheduleFlushRetryLocked();
+            }
+        }
+
+        private void StopWatchersLocked(bool clearPending)
+        {
+            _operationGeneration++;
             _flushTimer?.Dispose();
             _flushTimer = null;
-            _pendingAdds.Clear();
-            _pendingRemoves.Clear();
+            _restartTimer?.Dispose();
+            _restartTimer = null;
+            _periodicReconcileTimer?.Dispose();
+            _periodicReconcileTimer = null;
+
+            if (clearPending)
+            {
+                _pendingAdds.Clear();
+                _pendingRemoves.Clear();
+                _pendingFullReconcileRoots.Clear();
+                _pendingLightweightReconcileRoots.Clear();
+            }
 
             foreach (var watcher in _watchers)
             {
@@ -265,7 +410,9 @@ namespace Nsqs
 
             _watchers.Clear();
             _shareRoots.Clear();
-            _onIndexChanged = null;
+
+            if (clearPending)
+                _onIndexChanged = null;
         }
 
         public void Dispose()
@@ -273,7 +420,7 @@ namespace Nsqs
             lock (_lock)
             {
                 _disposed = true;
-                StopLocked();
+                StopWatchersLocked(clearPending: true);
             }
         }
     }
