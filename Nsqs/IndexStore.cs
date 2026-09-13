@@ -206,6 +206,25 @@ namespace Nsqs
 
         public static IncrementalApplyResult PurgeShareRoots(string dbPath, IReadOnlyList<string> removedRoots)
         {
+            const int maxAttempts = 5;
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                try
+                {
+                    return PurgeShareRootsCore(dbPath, removedRoots);
+                }
+                catch (SqliteException ex) when (attempt < maxAttempts && ex.SqliteErrorCode == 5)
+                {
+                    Thread.Sleep(50 * attempt);
+                }
+            }
+
+            return PurgeShareRootsCore(dbPath, removedRoots);
+        }
+
+        private static IncrementalApplyResult PurgeShareRootsCore(string dbPath, IReadOnlyList<string> removedRoots)
+        {
             if (!File.Exists(dbPath) || removedRoots.Count == 0)
                 return new IncrementalApplyResult(0, 0, 0);
 

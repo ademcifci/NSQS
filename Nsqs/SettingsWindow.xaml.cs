@@ -77,6 +77,7 @@ namespace Nsqs
         {
             ShareRootsList.ItemsSource = _settings.ShareRoots.ToList();
             HotkeyText.Text = _settings.Hotkey;
+            MaxResultsText.Text = _settings.MaxResults.ToString();
             ScheduleEnabledCheck.IsChecked = _settings.IndexSchedule.Enabled;
             ScheduleKindCombo.SelectedIndex = _settings.IndexSchedule.Kind == IndexScheduleKind.Weekly ? 1 : 0;
             DayOfWeekCombo.SelectedIndex = (int)_settings.IndexSchedule.DayOfWeek;
@@ -158,16 +159,18 @@ namespace Nsqs
         {
             Dispatcher.BeginInvoke(() =>
             {
+                ReloadSettingsFromSource();
+
                 if (progress.IsComplete)
                 {
                     HideIndexProgress();
-                    ReloadSettingsFromSource();
                     LoadFromSettings();
                     RefreshStatus();
                     return;
                 }
 
                 ShowIndexProgress(progress);
+                RefreshStatus();
                 RebuildButton.IsEnabled = false;
                 ExportIndexButton.IsEnabled = false;
             });
@@ -309,8 +312,17 @@ namespace Nsqs
                 return false;
             }
 
+            if (!int.TryParse(MaxResultsText.Text.Trim(), out var maxResults) || maxResults < 1 || maxResults > 500)
+            {
+                System.Windows.MessageBox.Show(this,
+                    "Enter max search results between 1 and 500.",
+                    Title, MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+
             _settings.ShareRoots = roots;
             _settings.Hotkey = hotkey;
+            _settings.MaxResults = maxResults;
             _settings.IndexSchedule.Enabled = ScheduleEnabledCheck.IsChecked == true;
             _settings.IndexSchedule.Kind = ScheduleKindCombo.SelectedIndex == 1
                 ? IndexScheduleKind.Weekly
@@ -340,16 +352,26 @@ namespace Nsqs
 
             if (removedRoots.Count > 0 && File.Exists(AppPaths.IndexFile))
             {
-                var purgeResult = IndexStore.PurgeShareRoots(AppPaths.IndexFile, removedRoots);
-                if (purgeResult.Removed > 0)
+                try
                 {
-                    Diagnostics.Log($"Purged {purgeResult.Removed} folders from removed share roots.");
-                    _settings = AppSettingsManager.Update(settings =>
+                    var purgeResult = IndexStore.PurgeShareRoots(AppPaths.IndexFile, removedRoots);
+                    if (purgeResult.Removed > 0)
                     {
-                        settings.LastIndexEntryCount = purgeResult.TotalCount;
-                        if (settings.LastIndexEntryCount == 0)
-                            settings.LastIndexedAt = null;
-                    });
+                        Diagnostics.Log($"Purged {purgeResult.Removed} folders from removed share roots.");
+                        _settings = AppSettingsManager.Update(settings =>
+                        {
+                            settings.LastIndexEntryCount = purgeResult.TotalCount;
+                            if (settings.LastIndexEntryCount == 0)
+                                settings.LastIndexedAt = null;
+                        });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.Log($"Failed to purge removed share roots: {ex.Message}");
+                    System.Windows.MessageBox.Show(this,
+                        $"Settings saved, but purging removed shares from the index failed:\n{ex.Message}",
+                        Title, MessageBoxButton.OK, MessageBoxImage.Warning);
                 }
             }
 

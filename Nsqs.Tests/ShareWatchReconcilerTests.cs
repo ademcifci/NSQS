@@ -27,4 +27,18 @@ public class ShareWatchReconcilerTests
         Assert.Equal(2, additions.Count);
         Assert.Contains(removals, path => path.Equals("\\\\server\\share\\Old", StringComparison.OrdinalIgnoreCase));
     }
+
+    [Fact]
+    public void CollectStalePaths_RemovesMissingDirectories()
+    {
+        var removals = new List<string>();
+        ShareWatchReconciler.CollectStalePaths(
+        [
+            "\\\\server\\share\\Missing",
+            "\\\\server\\share\\AlsoMissing"
+        ],
+        removals);
+
+        Assert.Equal(2, removals.Count);
+    }
 }

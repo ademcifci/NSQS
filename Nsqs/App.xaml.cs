@@ -75,7 +75,7 @@ namespace Nsqs
                     RequestRebuildIndex,
                     () => _appLifetimeCts.Token);
 
-                _launcherWindow = new LauncherWindow(() => _settings);
+                _launcherWindow = new LauncherWindow(() => _settings, () => _indexer.IsRunning);
                 _hotkeyManager = new HotkeyManager();
                 _hotkeyManager.HotkeyPressed += ToggleLauncher;
                 RegisterHotkeyFromSettings();
@@ -108,9 +108,13 @@ namespace Nsqs
         private void OnDispatcherUnhandledException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs args)
         {
             Diagnostics.Log($"UNHANDLED (dispatcher): {args.Exception}");
-            _trayIcon?.ShowWarning(App.ShortName, "An unexpected error occurred. See debug.log.");
+            _trayIcon?.ShowWarning(App.ShortName, "A fatal error occurred. NSQS will exit.");
             args.Handled = true;
+            Dispatcher.BeginInvoke(ExitApplication);
         }
+
+        private void PersistIndexMetadata(IndexMetadata metadata) =>
+            _settings = AppSettingsManager.SaveIndexMetadata(metadata);
 
         private void OnStartWithWindowsChanged(bool enabled)
         {
@@ -144,8 +148,14 @@ namespace Nsqs
 
         private void StartFolderWatcherIfReady()
         {
-            if (_indexer.IsRunning || _settings.ShareRoots.Count == 0)
+            if (_indexer.IsRunning)
                 return;
+
+            if (_settings.ShareRoots.Count == 0)
+            {
+                StopFolderWatcher();
+                return;
+            }
 
             if (!File.Exists(AppPaths.IndexFile) || !_settings.LastIndexedAt.HasValue)
                 return;
@@ -332,6 +342,7 @@ namespace Nsqs
 
             if (!_indexer.TryRebuildAsync(
                     _settings.ShareRoots,
+                    PersistIndexMetadata,
                     PrepareForIndexRebuild,
                     _appLifetimeCts.Token))
             {
@@ -491,6 +502,8 @@ namespace Nsqs
             base.OnExit(e);
             Diagnostics.Log("Shutdown complete.");
 
+            // Force process exit: background NAS enumeration/watcher threads may not
+            // finish cooperatively before WPF shutdown completes.
             Environment.Exit(0);
         }
     }

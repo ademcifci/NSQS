@@ -37,6 +37,7 @@ namespace Nsqs
 
         public bool TryRebuildAsync(
             IReadOnlyList<string> shareRoots,
+            Action<IndexMetadata>? persistIndexMetadata = null,
             Action? releaseLiveIndexLocks = null,
             CancellationToken cancellationToken = default)
         {
@@ -46,7 +47,7 @@ namespace Nsqs
                     return false;
 
                 _runningTask = Task.Run(
-                    async () => await RunRebuildAsync(shareRoots, releaseLiveIndexLocks, cancellationToken),
+                    async () => await RunRebuildAsync(shareRoots, persistIndexMetadata, releaseLiveIndexLocks, cancellationToken),
                     cancellationToken);
                 return true;
             }
@@ -67,7 +68,7 @@ namespace Nsqs
             Action? releaseLiveIndexLocks = null,
             CancellationToken cancellationToken = default)
         {
-            if (!TryRebuildAsync(shareRoots, releaseLiveIndexLocks, cancellationToken))
+            if (!TryRebuildAsync(shareRoots, null, releaseLiveIndexLocks, cancellationToken))
                 throw new InvalidOperationException("An index rebuild is already running.");
 
             return _runningTask!;
@@ -138,9 +139,14 @@ namespace Nsqs
 
         private async Task RunRebuildAsync(
             IReadOnlyList<string> shareRoots,
+            Action<IndexMetadata>? persistIndexMetadata,
             Action? releaseLiveIndexLocks,
             CancellationToken cancellationToken)
         {
+            void SaveMetadata(IndexMetadata metadata)
+            {
+                persistIndexMetadata?.Invoke(metadata);
+            }
             // Never block the UI thread — NAS enumeration can run for a long time.
             await Task.Yield();
 
@@ -232,7 +238,7 @@ namespace Nsqs
                     IndexFileHelper.DeleteDatabaseFiles(buildingPath);
 
                     var message = BuildAllRootsUnreachableMessage();
-                    AppSettingsManager.SaveIndexMetadata(new IndexMetadata { LastIndexError = message });
+                    SaveMetadata(new IndexMetadata { LastIndexError = message });
                     Diagnostics.Log(message);
                     Report(new IndexProgress
                     {
@@ -264,7 +270,7 @@ namespace Nsqs
                 IndexFileHelper.SwapDatabaseFiles(buildingPath, livePath, releaseLiveIndexLocks);
 
                 sw.Stop();
-                AppSettingsManager.SaveIndexMetadata(new IndexMetadata
+                SaveMetadata(new IndexMetadata
                 {
                     LastIndexedAt = DateTime.Now,
                     LastIndexEntryCount = total,
@@ -291,7 +297,7 @@ namespace Nsqs
             catch (Exception ex)
             {
                 sw.Stop();
-                AppSettingsManager.SaveIndexMetadata(new IndexMetadata { LastIndexError = ex.Message });
+                SaveMetadata(new IndexMetadata { LastIndexError = ex.Message });
                 Diagnostics.Log($"Index rebuild failed: {ex}");
                 Report(new IndexProgress { IsFailed = true, ErrorMessage = ex.Message, IsComplete = true });
                 try { IndexFileHelper.DeleteDatabaseFiles(buildingPath); } catch { /* ignore */ }

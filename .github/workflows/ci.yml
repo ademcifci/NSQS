@@ -19,3 +19,9 @@ jobs:
 
       - name: Run tests
         run: dotnet test Nsqs.Tests/Nsqs.Tests.csproj -c Release
+
+      - name: Build release
+        run: dotnet build Nsqs/Nsqs.csproj -c Release
+
+      - name: Publish portable (framework-dependent)
+        run: dotnet publish Nsqs/Nsqs.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:DebugType=none -o publish

@@ -89,6 +89,18 @@
                         </Grid>
                         <TextBlock Style="{StaticResource SettingsHelpTextStyle}"
                                    Text="Format: Ctrl+Shift+Space, Alt+G, etc. Changes apply when you save."/>
+
+                        <Border Style="{StaticResource SettingsSeparatorStyle}"/>
+
+                        <Grid Style="{StaticResource SettingsRowGridStyle}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Max search results" FontSize="14" VerticalAlignment="Center"/>
+                            <TextBox x:Name="MaxResultsText" Grid.Column="1" Width="80" VerticalAlignment="Center"
+                                     ToolTip="1–500 results shown in the launcher"/>
+                        </Grid>
                     </StackPanel>
                 </Border>
 

@@ -43,6 +43,7 @@ namespace Nsqs
     public partial class LauncherWindow : Window
     {
         private readonly Func<AppSettings> _getSettings;
+        private readonly Func<bool>? _isIndexerRunning;
         private AppSettings _settings;
         private readonly ObservableCollection<FolderEntry> _results = new();
         private readonly ObservableCollection<ShareFilterItem> _shareFilters = new();
@@ -54,10 +55,11 @@ namespace Nsqs
         private bool? _appliedDarkTheme;
         private ShareFilterItem? _focusedFilterItem;
 
-        public LauncherWindow(Func<AppSettings> getSettings)
+        public LauncherWindow(Func<AppSettings> getSettings, Func<bool>? isIndexerRunning = null)
         {
             InitializeComponent();
             _getSettings = getSettings;
+            _isIndexerRunning = isIndexerRunning;
             _settings = getSettings();
 
             Icon = IconFactory.CreateWindowIconSource();
@@ -561,6 +563,17 @@ namespace Nsqs
             if (query.Length == 0 || !File.Exists(AppPaths.IndexFile))
             {
                 UpdateResultState(hasQuery: false, resultCount: 0);
+                return;
+            }
+
+            if (_isIndexerRunning?.Invoke() == true)
+            {
+                _results.Clear();
+                _selectedIndex = -1;
+                EmptyStateText.Text = "Index is rebuilding…";
+                EmptyStateText.Visibility = Visibility.Visible;
+                ResultCountText.Text = string.Empty;
+                ExportResultsButton.Visibility = Visibility.Collapsed;
                 return;
             }
 

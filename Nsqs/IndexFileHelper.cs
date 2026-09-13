@@ -30,7 +30,8 @@ namespace Nsqs
 
             for (int attempt = 1; attempt <= maxAttempts; attempt++)
             {
-                releaseLocks?.Invoke();
+                if (attempt > 1)
+                    releaseLocks?.Invoke();
 
                 try
                 {

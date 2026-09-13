@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 
 namespace Nsqs
 {
@@ -24,6 +25,21 @@ namespace Nsqs
             foreach (var indexedPath in indexedPaths)
             {
                 if (diskPaths.Contains(indexedPath))
+                    continue;
+
+                var normalized = IndexStore.NormalizeDirectoryPath(indexedPath);
+                if (normalized != null)
+                    removals.Add(normalized);
+            }
+        }
+
+        public static void CollectStalePaths(
+            IReadOnlyList<string> indexedPaths,
+            List<string> removals)
+        {
+            foreach (var indexedPath in indexedPaths)
+            {
+                if (Directory.Exists(indexedPath))
                     continue;
 
                 var normalized = IndexStore.NormalizeDirectoryPath(indexedPath);
