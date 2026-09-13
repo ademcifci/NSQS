@@ -1,6 +1,6 @@
 bin/
 obj/
 publish/
-publish-test/
 dist/
+publish-test/
 *.user
