@@ -23,9 +23,7 @@ namespace Nsqs
                         _directoryReady = true;
                     }
 
-                    var info = new FileInfo(LogPath);
-                    if (info.Exists && info.Length > MaxBytes)
-                        File.WriteAllText(LogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  (earlier entries trimmed){Environment.NewLine}");
+                    RotateIfNeeded();
 
                     File.AppendAllText(LogPath, $"{DateTime.Now:HH:mm:ss.fff}  {message}{Environment.NewLine}");
                 }
@@ -33,6 +31,26 @@ namespace Nsqs
             catch
             {
                 // Diagnostics must never crash the app.
+            }
+        }
+
+        private static void RotateIfNeeded()
+        {
+            var info = new FileInfo(LogPath);
+            if (!info.Exists || info.Length <= MaxBytes)
+                return;
+
+            var backupPath = LogPath + ".old";
+            try
+            {
+                if (File.Exists(backupPath))
+                    File.Delete(backupPath);
+
+                File.Move(LogPath, backupPath);
+            }
+            catch
+            {
+                File.WriteAllText(LogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  (earlier entries trimmed){Environment.NewLine}");
             }
         }
     }

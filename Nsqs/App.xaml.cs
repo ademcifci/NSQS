@@ -37,10 +37,7 @@ namespace Nsqs
         {
             base.OnStartup(e);
 
-            DispatcherUnhandledException += (_, args) =>
-            {
-                Diagnostics.Log($"UNHANDLED (dispatcher): {args.Exception}");
-            };
+            DispatcherUnhandledException += OnDispatcherUnhandledException;
             AppDomain.CurrentDomain.UnhandledException += (_, args) =>
             {
                 Diagnostics.Log($"UNHANDLED (appdomain): {args.ExceptionObject}");
@@ -63,9 +60,11 @@ namespace Nsqs
 
                 ApplySystemAccent();
                 StartupHelper.RepairPathIfEnabled();
-                _settings = AppSettings.Load();
+                _settings = AppSettingsManager.Load();
 
                 EnsureIndexDatabase();
+                if (File.Exists(AppPaths.IndexFile))
+                    IndexStore.ConfigureLiveDatabase(AppPaths.IndexFile);
                 _indexStore.OpenForSearch(AppPaths.IndexFile);
 
                 _indexer.ProgressChanged += OnIndexProgress;
@@ -73,10 +72,10 @@ namespace Nsqs
                     _indexer,
                     () => _settings,
                     PrepareForIndexRebuild,
-                    OnIndexDatabaseSwapped,
+                    EnsureIndexStoreOpen,
                     () => _appLifetimeCts.Token);
 
-                _launcherWindow = new LauncherWindow(_indexStore, _settings);
+                _launcherWindow = new LauncherWindow(_indexStore, () => _settings);
                 _hotkeyManager = new HotkeyManager();
                 _hotkeyManager.HotkeyPressed += ToggleLauncher;
                 RegisterHotkeyFromSettings();
@@ -85,7 +84,7 @@ namespace Nsqs
                 if (!_settings.LaunchToTray)
                     ShowLauncher();
 
-                _trayIcon = new TrayIconManager(_settings);
+                _trayIcon = new TrayIconManager(_settings, OnStartWithWindowsChanged);
                 _trayIcon.LauncherRequested += ActivateLauncherFromExternalRequest;
                 _trayIcon.SettingsRequested += OpenSettings;
                 _trayIcon.RebuildIndexRequested += RequestRebuildIndex;
@@ -106,9 +105,21 @@ namespace Nsqs
             }
         }
 
+        private void OnDispatcherUnhandledException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs args)
+        {
+            Diagnostics.Log($"UNHANDLED (dispatcher): {args.Exception}");
+            args.Handled = true;
+        }
+
+        private void OnStartWithWindowsChanged(bool enabled)
+        {
+            _settings = AppSettingsManager.Update(settings => settings.StartWithWindows = enabled);
+            StartupHelper.SetEnabled(enabled);
+        }
+
         private void EnsureIndexDatabase()
         {
-            if (!System.IO.File.Exists(AppPaths.IndexFile))
+            if (!File.Exists(AppPaths.IndexFile))
                 IndexStore.InitializeDatabase(AppPaths.IndexFile);
         }
 
@@ -154,11 +165,7 @@ namespace Nsqs
                 if (_appLifetimeCts.IsCancellationRequested)
                     return;
 
-                if (_indexStore.IsOpen)
-                    _indexStore.Reopen();
-
-                _settings.LastIndexEntryCount = totalCount;
-                _settings.Save();
+                _settings = AppSettingsManager.Update(settings => settings.LastIndexEntryCount = totalCount);
                 UpdateTrayStatus();
             });
         }
@@ -298,9 +305,12 @@ namespace Nsqs
             StopFolderWatcher();
             _indexStore.Close();
             SqliteConnection.ClearAllPools();
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            SqliteConnection.ClearAllPools();
+            _ = Task.Run(() =>
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                SqliteConnection.ClearAllPools();
+            });
             Diagnostics.Log("Released live index locks for rebuild.");
         }
 
@@ -317,34 +327,36 @@ namespace Nsqs
 
             PrepareForIndexRebuild();
             _trayIcon?.SetRebuildEnabled(false);
-            _ = _indexer.RebuildAsync(
-                _settings.ShareRoots,
-                _settings,
-                PrepareForIndexRebuild,
-                _appLifetimeCts.Token).ContinueWith(t =>
+
+            if (!_indexer.TryRebuildAsync(
+                    _settings.ShareRoots,
+                    _settings,
+                    PrepareForIndexRebuild,
+                    _appLifetimeCts.Token))
             {
-                if (t.IsFaulted && t.Exception != null)
-                    Diagnostics.Log($"Rebuild task faulted: {t.Exception.GetBaseException().Message}");
-
-                Dispatcher.BeginInvoke(() =>
-                {
-                    if (_appLifetimeCts.IsCancellationRequested)
-                        return;
-
-                    EnsureIndexStoreOpen();
-                    _settings = AppSettings.Load();
-                    _trayIcon?.SetRebuildEnabled(true);
-                    UpdateTrayStatus();
-                    StartFolderWatcherIfReady();
-                });
-            }, TaskScheduler.Default);
+                EnsureIndexStoreOpen();
+                _trayIcon?.SetRebuildEnabled(true);
+            }
         }
 
-        private void OnIndexDatabaseSwapped()
+        private void CompleteIndexRebuild(bool succeeded)
         {
-            _indexStore.Close();
-            _indexStore.OpenForSearch(AppPaths.IndexFile);
-            _settings = AppSettings.Load();
+            if (succeeded)
+            {
+                _indexStore.Close();
+                if (File.Exists(AppPaths.IndexFile))
+                {
+                    IndexStore.ConfigureLiveDatabase(AppPaths.IndexFile);
+                    _indexStore.OpenForSearch(AppPaths.IndexFile);
+                }
+            }
+            else
+            {
+                EnsureIndexStoreOpen();
+            }
+
+            _settings = AppSettingsManager.Load();
+            _trayIcon?.SetRebuildEnabled(true);
             UpdateTrayStatus();
             StartFolderWatcherIfReady();
         }
@@ -357,17 +369,7 @@ namespace Nsqs
                     return;
 
                 if (progress.IsComplete)
-                {
-                    if (!progress.IsFailed)
-                        OnIndexDatabaseSwapped();
-                    else
-                    {
-                        EnsureIndexStoreOpen();
-                        StartFolderWatcherIfReady();
-                    }
-
-                    _trayIcon?.SetRebuildEnabled(true);
-                }
+                    CompleteIndexRebuild(!progress.IsFailed);
 
                 UpdateTrayStatus(progress.IsComplete ? null : progress);
             });
@@ -437,7 +439,8 @@ namespace Nsqs
                 _scheduler!,
                 onSaved: () =>
                 {
-                    _settings = AppSettings.Load();
+                    _settings = AppSettingsManager.Load();
+                    _launcherWindow?.RefreshSettings(_settings);
                     RegisterHotkeyFromSettings();
                     _scheduler?.Reschedule();
                     ApplyLaunchMode();
@@ -456,6 +459,10 @@ namespace Nsqs
             _appLifetimeCts.Cancel();
 
             SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+            DispatcherUnhandledException -= OnDispatcherUnhandledException;
+
+            if (_hotkeyManager != null)
+                _hotkeyManager.HotkeyPressed -= ToggleLauncher;
 
             _indexer.ProgressChanged -= OnIndexProgress;
             _folderWatcher?.Dispose();
@@ -475,7 +482,6 @@ namespace Nsqs
             base.OnExit(e);
             Diagnostics.Log("Shutdown complete.");
 
-            // Background NAS work can otherwise keep the process alive briefly after Exit.
             Environment.Exit(0);
         }
     }

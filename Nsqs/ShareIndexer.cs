@@ -35,7 +35,7 @@ namespace Nsqs
 
         public event Action<IndexProgress>? ProgressChanged;
 
-        public Task RebuildAsync(
+        public bool TryRebuildAsync(
             IReadOnlyList<string> shareRoots,
             AppSettings settings,
             Action? releaseLiveIndexLocks = null,
@@ -44,13 +44,87 @@ namespace Nsqs
             lock (_gate)
             {
                 if (_runningTask is { IsCompleted: false })
-                    throw new InvalidOperationException("An index rebuild is already running.");
+                    return false;
 
                 _runningTask = Task.Run(
                     async () => await RunRebuildAsync(shareRoots, settings, releaseLiveIndexLocks, cancellationToken),
                     cancellationToken);
-                return _runningTask;
+                return true;
             }
+        }
+
+        public Task WaitForCurrentRebuildAsync()
+        {
+            lock (_gate)
+            {
+                return _runningTask ?? Task.CompletedTask;
+            }
+        }
+
+        [Obsolete("Use TryRebuildAsync.")]
+        public Task RebuildAsync(
+            IReadOnlyList<string> shareRoots,
+            AppSettings settings,
+            Action? releaseLiveIndexLocks = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (!TryRebuildAsync(shareRoots, settings, releaseLiveIndexLocks, cancellationToken))
+                throw new InvalidOperationException("An index rebuild is already running.");
+
+            return _runningTask!;
+        }
+
+        public static IEnumerable<FolderEntry> EnumerateDirectoryEntries(string directoryPath, string normalizedRoot)
+        {
+            var normalizedDirectory = IndexStore.NormalizeDirectoryPath(directoryPath);
+            var root = NormalizeUncRoot(normalizedRoot);
+            if (normalizedDirectory == null || root == null)
+                yield break;
+
+            if (!Directory.Exists(normalizedDirectory))
+                yield break;
+
+            yield return CreateFolderEntry(normalizedDirectory, root);
+
+            var options = new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = true,
+                AttributesToSkip = FileAttributes.ReparsePoint
+            };
+
+            foreach (var dir in Directory.EnumerateDirectories(normalizedDirectory, "*", options))
+                yield return CreateFolderEntry(dir, root);
+        }
+
+        internal static FolderEntry CreateFolderEntry(string path, string normalizedRoot)
+        {
+            var normalizedPath = IndexStore.NormalizeDirectoryPath(path);
+            var normalizedRootPath = IndexStore.NormalizeDirectoryPath(normalizedRoot);
+            if (normalizedPath == null || normalizedRootPath == null)
+            {
+                return new FolderEntry
+                {
+                    Name = normalizedRoot.TrimEnd('\\'),
+                    Path = normalizedRoot,
+                    RootShare = normalizedRoot
+                };
+            }
+
+            var storedPath = string.Equals(normalizedPath, normalizedRootPath, StringComparison.OrdinalIgnoreCase)
+                ? normalizedRoot
+                : normalizedPath;
+
+            var name = Path.GetFileName(normalizedPath);
+            if (string.IsNullOrEmpty(name))
+                name = Path.GetFileName(normalizedRoot.TrimEnd('\\'));
+
+            return new FolderEntry
+            {
+                Name = name,
+                Path = storedPath,
+                RootShare = normalizedRoot
+            };
         }
 
         private async Task RunRebuildAsync(
@@ -100,34 +174,20 @@ namespace Nsqs
                         continue;
                     }
 
-                    store.InsertBatch(new[]
-                    {
-                        new FolderEntry
-                        {
-                            Name = Path.GetFileName(normalizedRoot.TrimEnd('\\')) is { Length: > 0 } n ? n : normalizedRoot,
-                            Path = normalizedRoot,
-                            RootShare = normalizedRoot
-                        }
-                    });
+                    store.InsertBatch(new[] { CreateFolderEntry(normalizedRoot, normalizedRoot) });
                     total++;
 
-                    var options = new EnumerationOptions
+                    foreach (var entry in EnumerateDirectoryEntries(normalizedRoot, normalizedRoot))
                     {
-                        RecurseSubdirectories = true,
-                        IgnoreInaccessible = true,
-                        AttributesToSkip = FileAttributes.ReparsePoint
-                    };
+                        if (string.Equals(entry.Path, normalizedRoot, StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(IndexStore.NormalizeDirectoryPath(entry.Path),
+                                IndexStore.NormalizeDirectoryPath(normalizedRoot),
+                                StringComparison.OrdinalIgnoreCase))
+                            continue;
 
-                    foreach (var dir in Directory.EnumerateDirectories(normalizedRoot, "*", options))
-                    {
                         cancellationToken.ThrowIfCancellationRequested();
 
-                        batch.Add(new FolderEntry
-                        {
-                            Name = Path.GetFileName(dir),
-                            Path = dir,
-                            RootShare = normalizedRoot
-                        });
+                        batch.Add(entry);
 
                         var pending = total + batch.Count;
                         if (batch.Count >= BatchSize)
@@ -167,7 +227,7 @@ namespace Nsqs
                 settings.LastIndexEntryCount = total;
                 settings.LastIndexDurationSeconds = sw.Elapsed.TotalSeconds;
                 settings.LastIndexError = null;
-                settings.Save();
+                AppSettingsManager.Save(settings);
 
                 Diagnostics.Log($"Index rebuild complete: {total} folders in {sw.Elapsed.TotalSeconds:F1}s");
                 Report(new IndexProgress { FoldersIndexed = total, IsComplete = true, ElapsedSeconds = sw.Elapsed.TotalSeconds });
@@ -182,7 +242,7 @@ namespace Nsqs
             {
                 sw.Stop();
                 settings.LastIndexError = ex.Message;
-                settings.Save();
+                AppSettingsManager.Save(settings);
                 Diagnostics.Log($"Index rebuild failed: {ex}");
                 Report(new IndexProgress { IsFailed = true, ErrorMessage = ex.Message, IsComplete = true });
                 try { IndexFileHelper.DeleteDatabaseFiles(buildingPath); } catch { /* ignore */ }

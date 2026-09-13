@@ -29,16 +29,21 @@ namespace Nsqs
 
         public static bool TrySignalExistingInstance()
         {
-            try
+            for (int attempt = 0; attempt < 5; attempt++)
             {
-                using var existing = EventWaitHandle.OpenExisting(ActivateEventName);
-                existing.Set();
-                return true;
+                try
+                {
+                    using var existing = EventWaitHandle.OpenExisting(ActivateEventName);
+                    existing.Set();
+                    return true;
+                }
+                catch (WaitHandleCannotBeOpenedException)
+                {
+                    Thread.Sleep(100);
+                }
             }
-            catch (WaitHandleCannotBeOpenedException)
-            {
-                return false;
-            }
+
+            return false;
         }
 
         public static SingleInstanceNotifier StartListening(Dispatcher dispatcher, Action onActivate) =>
@@ -65,6 +70,10 @@ namespace Nsqs
         public void Dispose()
         {
             _cts.Cancel();
+            _activateEvent.Set();
+            if (!_listenerThread.Join(TimeSpan.FromSeconds(2)))
+                Diagnostics.Log("Single-instance listener thread did not exit cleanly.");
+
             _activateEvent.Dispose();
             _cts.Dispose();
         }

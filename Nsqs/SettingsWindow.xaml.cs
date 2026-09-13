@@ -285,7 +285,7 @@ namespace Nsqs
             if (!ApplyToSettings())
                 return;
 
-            _settings.Save();
+            AppSettingsManager.Save(_settings);
             StartupHelper.SetEnabled(_settings.StartWithWindows);
             _onSaved();
             RefreshStatus();

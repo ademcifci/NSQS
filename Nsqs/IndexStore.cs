@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using Microsoft.Data.Sqlite;
 
 namespace Nsqs
@@ -57,7 +58,11 @@ namespace Nsqs
 
         public void Reopen()
         {
-            OpenForSearch(AppPaths.IndexFile);
+            if (_connection == null)
+                return;
+
+            var dbPath = _connection.DataSource;
+            OpenForSearch(dbPath);
         }
 
         public void Close()
@@ -86,6 +91,43 @@ namespace Nsqs
 
             _connection.Dispose();
             _connection = null;
+        }
+
+        public static void ConfigureLiveDatabase(string dbPath)
+        {
+            using var connection = OpenReadWriteConnection(dbPath);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "PRAGMA journal_mode=WAL;";
+            cmd.ExecuteNonQuery();
+        }
+
+        public static void CheckpointLiveDatabase(string dbPath)
+        {
+            if (!File.Exists(dbPath))
+                return;
+
+            try
+            {
+                using var connection = OpenReadWriteConnection(dbPath);
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+                cmd.ExecuteNonQuery();
+            }
+            catch
+            {
+                // Building databases and read-only opens may not support this.
+            }
+        }
+
+        public static IReadOnlyList<FolderEntry> SearchSnapshot(
+            string dbPath,
+            string query,
+            int maxResults,
+            IReadOnlyList<string>? rootShares = null)
+        {
+            using var store = new IndexStore();
+            store.OpenForSearch(dbPath);
+            return store.Search(query, maxResults, rootShares);
         }
 
         public static void InitializeDatabase(string dbPath)
@@ -196,6 +238,28 @@ namespace Nsqs
         public readonly record struct IncrementalApplyResult(int Added, int Removed, int TotalCount);
 
         public static IncrementalApplyResult ApplyIncrementalChanges(
+            string dbPath,
+            IReadOnlyList<FolderEntry> additions,
+            IReadOnlyList<string> removedDirectoryPaths)
+        {
+            const int maxAttempts = 5;
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                try
+                {
+                    return ApplyIncrementalChangesCore(dbPath, additions, removedDirectoryPaths);
+                }
+                catch (SqliteException ex) when (attempt < maxAttempts && ex.SqliteErrorCode == 5)
+                {
+                    Thread.Sleep(50 * attempt);
+                }
+            }
+
+            return ApplyIncrementalChangesCore(dbPath, additions, removedDirectoryPaths);
+        }
+
+        private static IncrementalApplyResult ApplyIncrementalChangesCore(
             string dbPath,
             IReadOnlyList<FolderEntry> additions,
             IReadOnlyList<string> removedDirectoryPaths)
@@ -396,6 +460,9 @@ namespace Nsqs
 
         internal static string EscapeCsv(string value)
         {
+            if (value.Length > 0 && "=+-@".Contains(value[0]))
+                value = "'" + value;
+
             if (value.Contains('"'))
                 value = value.Replace("\"", "\"\"");
 
@@ -477,15 +544,15 @@ namespace Nsqs
             if (rootShares == null || rootShares.Count == 0)
                 return new List<string>();
 
-            var normalized = new List<string>(rootShares.Count);
+            var normalized = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var root in rootShares)
             {
                 var path = ShareIndexer.NormalizeUncRoot(root);
-                if (path != null && !normalized.Contains(path, StringComparer.OrdinalIgnoreCase))
+                if (path != null)
                     normalized.Add(path);
             }
 
-            return normalized;
+            return normalized.ToList();
         }
 
         internal static string BuildFtsQuery(string userInput)
@@ -497,7 +564,7 @@ namespace Nsqs
             var parts = new List<string>(tokens.Length);
             foreach (var token in tokens)
             {
-                var cleaned = token.Replace("\"", string.Empty);
+                var cleaned = SanitizeFtsToken(token);
                 if (string.IsNullOrEmpty(cleaned))
                     continue;
 
@@ -505,6 +572,24 @@ namespace Nsqs
             }
 
             return parts.Count == 0 ? string.Empty : string.Join(" AND ", parts);
+        }
+
+        internal static string SanitizeFtsToken(string token)
+        {
+            if (string.IsNullOrWhiteSpace(token))
+                return string.Empty;
+
+            var chars = token.Where(c =>
+                c != '"' &&
+                c != '*' &&
+                c != '(' &&
+                c != ')' &&
+                c != ':' &&
+                c != '-' &&
+                c != '^' &&
+                c != '+').ToArray();
+
+            return new string(chars).Trim();
         }
 
         private void EnsureOpen()

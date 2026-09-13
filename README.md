@@ -40,6 +40,14 @@ dotnet run --project Nsqs
 
 Open the solution with `NSQS.sln`.
 
+## Tests
+
+```
+dotnet test Nsqs.Tests
+```
+
+`build.ps1` runs this suite and refuses to publish if it fails.
+
 ## Build a release
 
 ```

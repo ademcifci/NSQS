@@ -23,6 +23,10 @@ if (-not (Test-Path $iconPath)) {
 Remove-Item "$root\publish", "$root\dist" -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path "$root\dist" -Force | Out-Null
 
+Write-Host "Running tests" -ForegroundColor Cyan
+dotnet test "$root\Nsqs.Tests" -c Release
+if ($LASTEXITCODE -ne 0) { throw "tests failed - not publishing" }
+
 dotnet publish "$projectDir" -c Release -r win-x64 --self-contained false `
     -p:PublishSingleFile=true `
     -p:IncludeNativeLibrariesForSelfExtract=true `
