@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using Microsoft.Data.Sqlite;
 
@@ -14,8 +15,11 @@ namespace Nsqs
         public required string RootShare { get; init; }
     }
 
+    internal readonly record struct NormalizedFolderEntry(string Name, string Path, string RootShare);
+
     public sealed class IndexStore : IDisposable
     {
+        private const int InsertStatementChunkSize = 100;
         private readonly object _lock = new();
         private SqliteConnection? _connection;
 
@@ -333,31 +337,72 @@ namespace Nsqs
             {
                 EnsureOpen();
                 using var tx = _connection!.BeginTransaction();
-                using var cmd = _connection.CreateCommand();
-                cmd.Transaction = tx;
-                cmd.CommandText = """
-                    INSERT INTO folders_fts (name, path, root_share)
-                    VALUES ($name, $path, $root);
-                    """;
-                var nameParam = cmd.CreateParameter();
-                nameParam.ParameterName = "$name";
-                cmd.Parameters.Add(nameParam);
-                var pathParam = cmd.CreateParameter();
-                pathParam.ParameterName = "$path";
-                cmd.Parameters.Add(pathParam);
-                var rootParam = cmd.CreateParameter();
-                rootParam.ParameterName = "$root";
-                cmd.Parameters.Add(rootParam);
+                InsertFolderEntries(_connection, tx, batch);
+                tx.Commit();
+            }
+        }
 
-                foreach (var entry in batch)
+        internal static void InsertFolderEntries(
+            SqliteConnection connection,
+            SqliteTransaction tx,
+            IReadOnlyList<FolderEntry> entries)
+        {
+            if (entries.Count == 0)
+                return;
+
+            var normalized = new List<NormalizedFolderEntry>(entries.Count);
+            foreach (var entry in entries)
+            {
+                if (NormalizeDirectoryPath(entry.Path) == null)
+                    continue;
+
+                var root = ShareIndexer.NormalizeUncRoot(entry.RootShare);
+                if (root == null)
+                    continue;
+
+                normalized.Add(new NormalizedFolderEntry(entry.Name, entry.Path, root));
+            }
+
+            InsertNormalizedFolderEntries(connection, tx, normalized);
+        }
+
+        internal static void InsertNormalizedFolderEntries(
+            SqliteConnection connection,
+            SqliteTransaction tx,
+            IReadOnlyList<NormalizedFolderEntry> entries)
+        {
+            if (entries.Count == 0)
+                return;
+
+            for (int offset = 0; offset < entries.Count; offset += InsertStatementChunkSize)
+            {
+                var chunkSize = Math.Min(InsertStatementChunkSize, entries.Count - offset);
+                using var cmd = connection.CreateCommand();
+                cmd.Transaction = tx;
+
+                var sql = new StringBuilder(
+                    "INSERT INTO folders_fts (name, path, root_share) VALUES ");
+
+                for (int i = 0; i < chunkSize; i++)
                 {
-                    nameParam.Value = entry.Name;
-                    pathParam.Value = entry.Path;
-                    rootParam.Value = entry.RootShare;
-                    cmd.ExecuteNonQuery();
+                    if (i > 0)
+                        sql.Append(',');
+
+                    sql.Append("($n").Append(i).Append(", $p").Append(i).Append(", $r").Append(i).Append(')');
                 }
 
-                tx.Commit();
+                sql.Append(';');
+                cmd.CommandText = sql.ToString();
+
+                for (int i = 0; i < chunkSize; i++)
+                {
+                    var entry = entries[offset + i];
+                    cmd.Parameters.AddWithValue("$n" + i, entry.Name);
+                    cmd.Parameters.AddWithValue("$p" + i, entry.Path);
+                    cmd.Parameters.AddWithValue("$r" + i, entry.RootShare);
+                }
+
+                cmd.ExecuteNonQuery();
             }
         }
 
@@ -464,21 +509,7 @@ namespace Nsqs
                     existsParam.ParameterName = "$path";
                     existsCmd.Parameters.Add(existsParam);
 
-                    using var insertCmd = connection.CreateCommand();
-                    insertCmd.Transaction = tx;
-                    insertCmd.CommandText = """
-                        INSERT INTO folders_fts (name, path, root_share)
-                        VALUES ($name, $path, $root);
-                        """;
-                    var nameParam = insertCmd.CreateParameter();
-                    nameParam.ParameterName = "$name";
-                    insertCmd.Parameters.Add(nameParam);
-                    var pathParam = insertCmd.CreateParameter();
-                    pathParam.ParameterName = "$path";
-                    insertCmd.Parameters.Add(pathParam);
-                    var rootParam = insertCmd.CreateParameter();
-                    rootParam.ParameterName = "$root";
-                    insertCmd.Parameters.Add(rootParam);
+                    var newEntries = new List<NormalizedFolderEntry>(additions.Count);
 
                     foreach (var entry in additions)
                     {
@@ -491,11 +522,13 @@ namespace Nsqs
                         if (existsCmd.ExecuteScalar() != null)
                             continue;
 
-                        nameParam.Value = entry.Name;
-                        pathParam.Value = normalizedPath;
-                        rootParam.Value = normalizedRoot;
-                        insertCmd.ExecuteNonQuery();
-                        added++;
+                        newEntries.Add(new NormalizedFolderEntry(entry.Name, normalizedPath, normalizedRoot));
+                    }
+
+                    if (newEntries.Count > 0)
+                    {
+                        InsertNormalizedFolderEntries(connection, tx, newEntries);
+                        added = newEntries.Count;
                     }
                 }
 

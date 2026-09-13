@@ -147,4 +147,42 @@ public class IndexStoreTests
             TestFileHelper.DeleteTempDirectory(tempDir);
         }
     }
+
+    [Fact]
+    public void InsertBatch_InsertsLargeBatchInChunks()
+    {
+        var tempDir = TestFileHelper.CreateTempDirectory();
+        var dbPath = Path.Combine(tempDir, "index.db");
+
+        try
+        {
+            IndexStore.InitializeDatabase(dbPath);
+            using var store = new IndexStore();
+            store.OpenForWrite(dbPath);
+
+            var root = "\\\\server\\share\\";
+            var entries = new List<FolderEntry>(250);
+            for (int i = 0; i < 250; i++)
+            {
+                entries.Add(new FolderEntry
+                {
+                    Name = $"Folder{i}",
+                    Path = $"\\\\server\\share\\Folder{i}",
+                    RootShare = root
+                });
+            }
+
+            store.InsertBatch(entries);
+
+            Assert.Equal(250, store.GetEntryCount());
+
+            var results = IndexStore.SearchSnapshot(dbPath, "Folder249", 10, null);
+            Assert.Single(results);
+            Assert.Equal("Folder249", results[0].Name);
+        }
+        finally
+        {
+            TestFileHelper.DeleteTempDirectory(tempDir);
+        }
+    }
 }

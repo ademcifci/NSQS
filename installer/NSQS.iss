@@ -5,7 +5,7 @@
 
 #define AppName        "Network Share Quick Search (NSQS)"
 #ifndef AppVersion
-  #define AppVersion   "1.2.3"
+  #define AppVersion   "1.2.4"
 #endif
 #define AppPublisher   "Adem Cifcioglu"
 #define AppExeName     "NSQS.exe"
