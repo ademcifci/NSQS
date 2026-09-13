@@ -189,10 +189,152 @@ namespace Nsqs
             lock (_lock)
             {
                 EnsureOpen();
-                using var cmd = _connection!.CreateCommand();
-                cmd.CommandText = "SELECT COUNT(*) FROM folders_fts;";
-                return Convert.ToInt32(cmd.ExecuteScalar());
+                return QueryEntryCount(_connection!);
             }
+        }
+
+        public readonly record struct IncrementalApplyResult(int Added, int Removed, int TotalCount);
+
+        public static IncrementalApplyResult ApplyIncrementalChanges(
+            string dbPath,
+            IReadOnlyList<FolderEntry> additions,
+            IReadOnlyList<string> removedDirectoryPaths)
+        {
+            if (!File.Exists(dbPath))
+                return new IncrementalApplyResult(0, 0, 0);
+
+            if (additions.Count == 0 && removedDirectoryPaths.Count == 0)
+            {
+                using var countConnection = OpenReadWriteConnection(dbPath);
+                return new IncrementalApplyResult(0, 0, QueryEntryCount(countConnection));
+            }
+
+            using var connection = OpenReadWriteConnection(dbPath);
+            var added = 0;
+            var removed = 0;
+
+            using (var tx = connection.BeginTransaction())
+            {
+                using (var deleteCmd = connection.CreateCommand())
+                {
+                    deleteCmd.Transaction = tx;
+                    deleteCmd.CommandText = """
+                        DELETE FROM folders_fts
+                        WHERE path = $path OR path LIKE $prefix ESCAPE '\';
+                        """;
+                    var pathParam = deleteCmd.CreateParameter();
+                    pathParam.ParameterName = "$path";
+                    deleteCmd.Parameters.Add(pathParam);
+                    var prefixParam = deleteCmd.CreateParameter();
+                    prefixParam.ParameterName = "$prefix";
+                    deleteCmd.Parameters.Add(prefixParam);
+
+                    foreach (var directoryPath in removedDirectoryPaths)
+                    {
+                        var normalized = NormalizeDirectoryPath(directoryPath);
+                        if (normalized == null)
+                            continue;
+
+                        pathParam.Value = normalized;
+                        prefixParam.Value = normalized.TrimEnd('\\') + "\\%";
+                        removed += deleteCmd.ExecuteNonQuery();
+                    }
+                }
+
+                using (var existsCmd = connection.CreateCommand())
+                {
+                    existsCmd.Transaction = tx;
+                    existsCmd.CommandText = "SELECT 1 FROM folders_fts WHERE path = $path LIMIT 1;";
+                    var existsParam = existsCmd.CreateParameter();
+                    existsParam.ParameterName = "$path";
+                    existsCmd.Parameters.Add(existsParam);
+
+                    using var insertCmd = connection.CreateCommand();
+                    insertCmd.Transaction = tx;
+                    insertCmd.CommandText = """
+                        INSERT INTO folders_fts (name, path, root_share)
+                        VALUES ($name, $path, $root);
+                        """;
+                    var nameParam = insertCmd.CreateParameter();
+                    nameParam.ParameterName = "$name";
+                    insertCmd.Parameters.Add(nameParam);
+                    var pathParam = insertCmd.CreateParameter();
+                    pathParam.ParameterName = "$path";
+                    insertCmd.Parameters.Add(pathParam);
+                    var rootParam = insertCmd.CreateParameter();
+                    rootParam.ParameterName = "$root";
+                    insertCmd.Parameters.Add(rootParam);
+
+                    foreach (var entry in additions)
+                    {
+                        var normalizedPath = NormalizeDirectoryPath(entry.Path);
+                        var normalizedRoot = ShareIndexer.NormalizeUncRoot(entry.RootShare);
+                        if (normalizedPath == null || normalizedRoot == null)
+                            continue;
+
+                        existsParam.Value = normalizedPath;
+                        if (existsCmd.ExecuteScalar() != null)
+                            continue;
+
+                        nameParam.Value = entry.Name;
+                        pathParam.Value = normalizedPath;
+                        rootParam.Value = normalizedRoot;
+                        insertCmd.ExecuteNonQuery();
+                        added++;
+                    }
+                }
+
+                var total = QueryEntryCount(connection, tx);
+                using (var metaCmd = connection.CreateCommand())
+                {
+                    metaCmd.Transaction = tx;
+                    metaCmd.CommandText = """
+                        INSERT INTO meta (key, value) VALUES ('entry_count', $value)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+                        """;
+                    metaCmd.Parameters.AddWithValue("$value", total.ToString());
+                    metaCmd.ExecuteNonQuery();
+                }
+
+                tx.Commit();
+                return new IncrementalApplyResult(added, removed, total);
+            }
+        }
+
+        internal static string? NormalizeDirectoryPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return null;
+
+            var trimmed = path.Trim();
+            if (!trimmed.StartsWith(@"\\", StringComparison.Ordinal))
+                return null;
+
+            return trimmed.TrimEnd('\\');
+        }
+
+        private static SqliteConnection OpenReadWriteConnection(string dbPath)
+        {
+            var builder = new SqliteConnectionStringBuilder
+            {
+                DataSource = dbPath,
+                Mode = SqliteOpenMode.ReadWrite,
+                Cache = SqliteCacheMode.Default
+            };
+
+            var connection = new SqliteConnection(builder.ConnectionString);
+            connection.Open();
+            return connection;
+        }
+
+        private static int QueryEntryCount(SqliteConnection connection, SqliteTransaction? tx = null)
+        {
+            using var cmd = connection.CreateCommand();
+            if (tx != null)
+                cmd.Transaction = tx;
+
+            cmd.CommandText = "SELECT COUNT(*) FROM folders_fts;";
+            return Convert.ToInt32(cmd.ExecuteScalar());
         }
 
         public static int ExportToCsv(string dbPath, string csvPath)

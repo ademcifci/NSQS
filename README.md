@@ -106,11 +106,24 @@ Settings and index data:
 
 Only one instance runs at a time. Launching again activates the existing overlay.
 
+### Indexing
+
+NSQS keeps a local search index on disk. It is updated in two ways:
+
+1. **Full rebuild** — walks every folder under your configured share roots. Runs on first launch,
+   on a schedule (Settings), via **Rebuild index now**, or when a missed scheduled run is caught on
+   startup.
+2. **Live folder watch** (v1.1+) — while the app is running, new folders created on a watched
+   share are added to the index within a few seconds. Renames and deletes are reflected too.
+
+The watcher supplements full rebuilds; it does not replace them. Scheduled rebuilds still run as
+before and correct anything the network share notifications may have missed.
+
 ## Troubleshooting
 
 | Symptom | Things to check |
 |---------|-----------------|
-| No results | Confirm share roots in Settings and that indexing finished (tray tooltip shows folder count). Use **Rebuild index now** if needed. |
+| New folder not in search | The app must be running and the share reachable. Watch updates take a few seconds; use **Rebuild index now** if needed. |
 | Index never updates | Scheduled rebuild requires the app to be running (or use **Run missed index on startup**). |
 | Hotkey does nothing | Another app may own the same shortcut — pick a different hotkey in Settings and save. |
 | Share unreachable during index | Check network/VPN access to the UNC path; errors are logged to `debug.log`. |
