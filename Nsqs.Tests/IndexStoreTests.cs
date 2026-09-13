@@ -48,4 +48,62 @@ public class IndexStoreTests
             TestFileHelper.DeleteTempDirectory(tempDir);
         }
     }
+
+    [Fact]
+    public void ReadEntriesForRoots_ReturnsOnlyMatchingShares()
+    {
+        var tempDir = TestFileHelper.CreateTempDirectory();
+        var dbPath = Path.Combine(tempDir, "index.db");
+
+        try
+        {
+            IndexStore.InitializeDatabase(dbPath);
+            var shareA = "\\\\server\\share-a\\";
+            var shareB = "\\\\server\\share-b\\";
+
+            IndexStore.ApplyIncrementalChanges(dbPath,
+            [
+                new FolderEntry { Name = "A1", Path = "\\\\server\\share-a\\A1", RootShare = shareA },
+                new FolderEntry { Name = "B1", Path = "\\\\server\\share-b\\B1", RootShare = shareB }
+            ],
+            []);
+
+            var entries = IndexStore.ReadEntriesForRoots(dbPath, [shareA]);
+
+            Assert.Single(entries);
+            Assert.Equal("A1", entries[0].Name);
+        }
+        finally
+        {
+            TestFileHelper.DeleteTempDirectory(tempDir);
+        }
+    }
+
+    [Fact]
+    public void GetIndexedPathsForRoot_ReturnsStoredPaths()
+    {
+        var tempDir = TestFileHelper.CreateTempDirectory();
+        var dbPath = Path.Combine(tempDir, "index.db");
+
+        try
+        {
+            IndexStore.InitializeDatabase(dbPath);
+            var root = "\\\\server\\share\\";
+
+            IndexStore.ApplyIncrementalChanges(dbPath,
+            [
+                new FolderEntry { Name = "Movies", Path = "\\\\server\\share\\Movies", RootShare = root }
+            ],
+            []);
+
+            var paths = IndexStore.GetIndexedPathsForRoot(dbPath, root);
+
+            Assert.Single(paths);
+            Assert.Equal("\\\\server\\share\\Movies", paths[0]);
+        }
+        finally
+        {
+            TestFileHelper.DeleteTempDirectory(tempDir);
+        }
+    }
 }

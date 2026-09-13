@@ -7,7 +7,7 @@ namespace Nsqs
     public sealed class TrayIconManager : IDisposable
     {
         private readonly NotifyIcon _notifyIcon;
-        private readonly AppSettings _settings;
+        private readonly Func<AppSettings> _getSettings;
         private readonly Action<bool> _onStartWithWindowsChanged;
         private readonly ToolStripMenuItem _startWithWindowsItem;
         private readonly ToolStripMenuItem _rebuildItem;
@@ -18,15 +18,15 @@ namespace Nsqs
         public event Action? RebuildIndexRequested;
         public event Action? ExitRequested;
 
-        public TrayIconManager(AppSettings settings, Action<bool> onStartWithWindowsChanged)
+        public TrayIconManager(Func<AppSettings> getSettings, Action<bool> onStartWithWindowsChanged)
         {
-            _settings = settings;
+            _getSettings = getSettings;
             _onStartWithWindowsChanged = onStartWithWindowsChanged;
 
             _startWithWindowsItem = new ToolStripMenuItem("Start with Windows")
             {
                 CheckOnClick = true,
-                Checked = _settings.StartWithWindows
+                Checked = _getSettings().StartWithWindows
             };
             _startWithWindowsItem.Click += OnStartWithWindowsClick;
 
@@ -41,7 +41,7 @@ namespace Nsqs
             menu.Items.Add(_startWithWindowsItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add($"Exit {App.ShortName}", null, (_, _) => ExitRequested?.Invoke());
-            _menuOpeningHandler = (_, _) => _startWithWindowsItem.Checked = _settings.StartWithWindows;
+            _menuOpeningHandler = (_, _) => _startWithWindowsItem.Checked = _getSettings().StartWithWindows;
             menu.Opening += _menuOpeningHandler;
 
             _notifyIcon = new NotifyIcon
@@ -76,6 +76,11 @@ namespace Nsqs
         public void SetRebuildEnabled(bool enabled)
         {
             _rebuildItem.Enabled = enabled;
+        }
+
+        public void RefreshSettings()
+        {
+            _startWithWindowsItem.Checked = _getSettings().StartWithWindows;
         }
 
         public void Dispose()

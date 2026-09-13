@@ -71,11 +71,10 @@ namespace Nsqs
                 _scheduler = new IndexScheduler(
                     _indexer,
                     () => _settings,
-                    PrepareForIndexRebuild,
-                    EnsureIndexStoreOpen,
+                    RequestRebuildIndex,
                     () => _appLifetimeCts.Token);
 
-                _launcherWindow = new LauncherWindow(_indexStore, () => _settings);
+                _launcherWindow = new LauncherWindow(() => _settings);
                 _hotkeyManager = new HotkeyManager();
                 _hotkeyManager.HotkeyPressed += ToggleLauncher;
                 RegisterHotkeyFromSettings();
@@ -84,7 +83,7 @@ namespace Nsqs
                 if (!_settings.LaunchToTray)
                     ShowLauncher();
 
-                _trayIcon = new TrayIconManager(_settings, OnStartWithWindowsChanged);
+                _trayIcon = new TrayIconManager(() => _settings, OnStartWithWindowsChanged);
                 _trayIcon.LauncherRequested += ActivateLauncherFromExternalRequest;
                 _trayIcon.SettingsRequested += OpenSettings;
                 _trayIcon.RebuildIndexRequested += RequestRebuildIndex;
@@ -357,6 +356,7 @@ namespace Nsqs
 
             _settings = AppSettingsManager.Load();
             _trayIcon?.SetRebuildEnabled(true);
+            _trayIcon?.RefreshSettings();
             UpdateTrayStatus();
             StartFolderWatcherIfReady();
         }
@@ -390,6 +390,12 @@ namespace Nsqs
 
             if (_settings.LastIndexedAt.HasValue)
             {
+                if (!string.IsNullOrEmpty(_settings.LastIndexError))
+                {
+                    _trayIcon.SetStatus($"{ProductName}: {_settings.LastIndexEntryCount:N0} folders — warning");
+                    return;
+                }
+
                 _trayIcon.SetStatus($"{ProductName}: {_settings.LastIndexEntryCount:N0} folders — {_settings.Hotkey}");
             }
             else
@@ -412,9 +418,9 @@ namespace Nsqs
         private void ApplySystemAccent()
         {
             var accent = ThemeHelper.GetSystemAccentColor();
-            Resources["AccentBrush"] = new SolidColorBrush(accent);
-            Resources["AccentHoverBrush"] = new SolidColorBrush(ThemeHelper.Lighten(accent, 0.15));
-            Resources["AccentPressedBrush"] = new SolidColorBrush(ThemeHelper.Darken(accent, 0.2));
+            Resources["AccentBrush"] = ThemeHelper.CreateFrozenBrush(accent);
+            Resources["AccentHoverBrush"] = ThemeHelper.CreateFrozenBrush(ThemeHelper.Lighten(accent, 0.15));
+            Resources["AccentPressedBrush"] = ThemeHelper.CreateFrozenBrush(ThemeHelper.Darken(accent, 0.2));
         }
 
         private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
@@ -441,6 +447,7 @@ namespace Nsqs
                 {
                     _settings = AppSettingsManager.Load();
                     _launcherWindow?.RefreshSettings(_settings);
+                    _trayIcon?.RefreshSettings();
                     RegisterHotkeyFromSettings();
                     _scheduler?.Reschedule();
                     ApplyLaunchMode();

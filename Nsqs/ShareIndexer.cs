@@ -127,6 +127,16 @@ namespace Nsqs
             };
         }
 
+        internal static bool ShouldAbortRebuild(int reachableRootCount) => reachableRootCount == 0;
+
+        internal static string BuildAllRootsUnreachableMessage() =>
+            "All share roots were unreachable; existing index kept.";
+
+        internal static string BuildSkippedRootsWarning(IReadOnlyList<string> skippedRoots) =>
+            skippedRoots.Count == 0
+                ? string.Empty
+                : $"Skipped unreachable shares: {string.Join(", ", skippedRoots)}";
+
         private async Task RunRebuildAsync(
             IReadOnlyList<string> shareRoots,
             AppSettings settings,
@@ -153,6 +163,8 @@ namespace Nsqs
                 store.OpenForWrite(buildingPath);
 
                 int total = 0;
+                int reachableRootCount = 0;
+                var skippedRoots = new List<string>();
                 var batch = new List<FolderEntry>(BatchSize);
 
                 foreach (var root in shareRoots)
@@ -171,8 +183,11 @@ namespace Nsqs
                     if (!Directory.Exists(normalizedRoot))
                     {
                         Diagnostics.Log($"Share root not reachable: {normalizedRoot}");
+                        skippedRoots.Add(normalizedRoot);
                         continue;
                     }
+
+                    reachableRootCount++;
 
                     store.InsertBatch(new[] { CreateFolderEntry(normalizedRoot, normalizedRoot) });
                     total++;
@@ -213,6 +228,36 @@ namespace Nsqs
                     batch.Clear();
                 }
 
+                if (ShouldAbortRebuild(reachableRootCount))
+                {
+                    store.Close();
+                    IndexFileHelper.DeleteDatabaseFiles(buildingPath);
+
+                    var message = BuildAllRootsUnreachableMessage();
+                    settings.LastIndexError = message;
+                    AppSettingsManager.Save(settings);
+                    Diagnostics.Log(message);
+                    Report(new IndexProgress
+                    {
+                        IsFailed = true,
+                        ErrorMessage = message,
+                        IsComplete = true,
+                        ElapsedSeconds = sw.Elapsed.TotalSeconds
+                    });
+                    return;
+                }
+
+                if (skippedRoots.Count > 0 && File.Exists(livePath))
+                {
+                    var preserved = IndexStore.ReadEntriesForRoots(livePath, skippedRoots);
+                    if (preserved.Count > 0)
+                    {
+                        store.InsertBatch(preserved);
+                        total += preserved.Count;
+                        Diagnostics.Log($"Preserved {preserved.Count} folders from {skippedRoots.Count} unreachable share(s).");
+                    }
+                }
+
                 Report(new IndexProgress { FoldersIndexed = total, CurrentRoot = "Saving index…", ElapsedSeconds = sw.Elapsed.TotalSeconds });
 
                 store.SetMeta("built_at", DateTime.Now.ToString("O"));
@@ -226,7 +271,9 @@ namespace Nsqs
                 settings.LastIndexedAt = DateTime.Now;
                 settings.LastIndexEntryCount = total;
                 settings.LastIndexDurationSeconds = sw.Elapsed.TotalSeconds;
-                settings.LastIndexError = null;
+                settings.LastIndexError = skippedRoots.Count > 0
+                    ? BuildSkippedRootsWarning(skippedRoots)
+                    : null;
                 AppSettingsManager.Save(settings);
 
                 Diagnostics.Log($"Index rebuild complete: {total} folders in {sw.Elapsed.TotalSeconds:F1}s");
@@ -236,6 +283,13 @@ namespace Nsqs
             {
                 Diagnostics.Log("Index rebuild cancelled.");
                 try { IndexFileHelper.DeleteDatabaseFiles(buildingPath); } catch { /* ignore */ }
+                Report(new IndexProgress
+                {
+                    IsFailed = true,
+                    ErrorMessage = "Index rebuild cancelled.",
+                    IsComplete = true,
+                    ElapsedSeconds = sw.Elapsed.TotalSeconds
+                });
                 throw;
             }
             catch (Exception ex)

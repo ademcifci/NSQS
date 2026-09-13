@@ -77,17 +77,51 @@ namespace Nsqs
 
         private static void RestoreLiveFromBackup(string livePath, string backupPath)
         {
-            if (!File.Exists(livePath) && File.Exists(backupPath))
+            if (!File.Exists(backupPath))
+                return;
+
+            if (File.Exists(livePath) && IsValidDatabase(livePath))
+                return;
+
+            try
             {
-                try
+                DeleteDatabaseFiles(livePath);
+                File.Copy(backupPath, livePath, overwrite: true);
+
+                if (!IsValidDatabase(livePath))
+                    throw new InvalidDataException("Restored index backup failed integrity check.");
+
+                IndexStore.ConfigureLiveDatabase(livePath);
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Log($"Index backup restore failed: {ex.Message}");
+            }
+        }
+
+        internal static bool IsValidDatabase(string dbPath)
+        {
+            if (!File.Exists(dbPath))
+                return false;
+
+            try
+            {
+                var builder = new SqliteConnectionStringBuilder
                 {
-                    File.Copy(backupPath, livePath, overwrite: true);
-                    IndexStore.ConfigureLiveDatabase(livePath);
-                }
-                catch (Exception ex)
-                {
-                    Diagnostics.Log($"Index backup restore failed: {ex.Message}");
-                }
+                    DataSource = dbPath,
+                    Mode = SqliteOpenMode.ReadOnly,
+                    Cache = SqliteCacheMode.Default
+                };
+
+                using var connection = new SqliteConnection(builder.ConnectionString);
+                connection.Open();
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = "PRAGMA quick_check;";
+                return string.Equals(cmd.ExecuteScalar()?.ToString(), "ok", StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
             }
         }
     }

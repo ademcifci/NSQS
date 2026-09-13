@@ -42,7 +42,6 @@ namespace Nsqs
 
     public partial class LauncherWindow : Window
     {
-        private readonly IndexStore _indexStore;
         private readonly Func<AppSettings> _getSettings;
         private AppSettings _settings;
         private readonly ObservableCollection<FolderEntry> _results = new();
@@ -55,10 +54,9 @@ namespace Nsqs
         private bool? _appliedDarkTheme;
         private ShareFilterItem? _focusedFilterItem;
 
-        public LauncherWindow(IndexStore indexStore, Func<AppSettings> getSettings)
+        public LauncherWindow(Func<AppSettings> getSettings)
         {
             InitializeComponent();
-            _indexStore = indexStore;
             _getSettings = getSettings;
             _settings = getSettings();
 

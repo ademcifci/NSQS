@@ -61,4 +61,41 @@ public class IndexFileHelperTests
             TestFileHelper.DeleteTempDirectory(tempDir);
         }
     }
+
+    [Fact]
+    public void IsValidDatabase_RejectsCorruptFile()
+    {
+        var tempDir = TestFileHelper.CreateTempDirectory();
+        var dbPath = Path.Combine(tempDir, "index.db");
+
+        try
+        {
+            Directory.CreateDirectory(tempDir);
+            File.WriteAllText(dbPath, "not a sqlite database");
+
+            Assert.False(IndexFileHelper.IsValidDatabase(dbPath));
+        }
+        finally
+        {
+            TestFileHelper.DeleteTempDirectory(tempDir);
+        }
+    }
+
+    [Fact]
+    public void IsValidDatabase_AcceptsInitializedDatabase()
+    {
+        var tempDir = TestFileHelper.CreateTempDirectory();
+        var dbPath = Path.Combine(tempDir, "index.db");
+
+        try
+        {
+            IndexStore.InitializeDatabase(dbPath);
+
+            Assert.True(IndexFileHelper.IsValidDatabase(dbPath));
+        }
+        finally
+        {
+            TestFileHelper.DeleteTempDirectory(tempDir);
+        }
+    }
 }

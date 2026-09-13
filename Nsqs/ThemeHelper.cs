@@ -59,5 +59,12 @@ namespace Nsqs
             byte D(byte channel) => (byte)(channel * (1 - amount));
             return Color.FromRgb(D(c.R), D(c.G), D(c.B));
         }
+
+        public static SolidColorBrush CreateFrozenBrush(Color color)
+        {
+            var brush = new SolidColorBrush(color);
+            brush.Freeze();
+            return brush;
+        }
     }
 }

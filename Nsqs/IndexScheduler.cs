@@ -1,5 +1,4 @@
 using System;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -9,8 +8,7 @@ namespace Nsqs
     {
         private readonly ShareIndexer _indexer;
         private readonly Func<AppSettings> _getSettings;
-        private readonly Action _beforeRebuild;
-        private readonly Action _ensureIndexAvailable;
+        private readonly Action _requestRebuild;
         private readonly Func<CancellationToken> _getCancellationToken;
         private CancellationTokenSource? _timerCts;
         private readonly object _lock = new();
@@ -19,14 +17,12 @@ namespace Nsqs
         public IndexScheduler(
             ShareIndexer indexer,
             Func<AppSettings> getSettings,
-            Action beforeRebuild,
-            Action ensureIndexAvailable,
+            Action requestRebuild,
             Func<CancellationToken> getCancellationToken)
         {
             _indexer = indexer;
             _getSettings = getSettings;
-            _beforeRebuild = beforeRebuild;
-            _ensureIndexAvailable = ensureIndexAvailable;
+            _requestRebuild = requestRebuild;
             _getCancellationToken = getCancellationToken;
         }
 
@@ -96,17 +92,14 @@ namespace Nsqs
                 return;
 
             var settings = _getSettings();
-            var shareRoots = settings.ShareRoots.ToList();
-            if (shareRoots.Count == 0)
+            if (settings.ShareRoots.Count == 0)
                 return;
 
             try
             {
-                _beforeRebuild();
-                if (!_indexer.TryRebuildAsync(shareRoots, settings, _beforeRebuild, _getCancellationToken()))
-                    return;
-
-                await _indexer.WaitForCurrentRebuildAsync();
+                _requestRebuild();
+                if (_indexer.IsRunning)
+                    await _indexer.WaitForCurrentRebuildAsync();
             }
             catch (OperationCanceledException)
             {
@@ -114,8 +107,6 @@ namespace Nsqs
             }
             finally
             {
-                _ensureIndexAvailable();
-
                 if (!_disposed && !_getCancellationToken().IsCancellationRequested)
                     Reschedule();
             }

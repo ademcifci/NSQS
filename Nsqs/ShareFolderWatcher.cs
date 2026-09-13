@@ -23,6 +23,7 @@ namespace Nsqs
         private Action<int>? _onIndexChanged;
         private bool _disposed;
         private int _errorRestartCount;
+        private int _operationGeneration;
 
         public void Start(IReadOnlyList<string> shareRoots, Action<int> onIndexChanged)
         {
@@ -209,6 +210,7 @@ namespace Nsqs
             List<string> reconcileRoots;
             IReadOnlyList<string> roots;
             Action<int>? callback;
+            int generation;
 
             lock (_lock)
             {
@@ -223,6 +225,7 @@ namespace Nsqs
                 reconcileRoots = _pendingReconcileRoots.ToList();
                 roots = _shareRoots.ToList();
                 callback = _onIndexChanged;
+                generation = _operationGeneration;
 
                 _pendingAdds.Clear();
                 _pendingRemoves.Clear();
@@ -252,11 +255,19 @@ namespace Nsqs
                     if (!Directory.Exists(root))
                         continue;
 
-                    foreach (var entry in ShareIndexer.EnumerateDirectoryEntries(root, root))
-                    {
-                        if (seenPaths.Add(entry.Path))
-                            additions.Add(entry);
-                    }
+                    var indexedPaths = IndexStore.GetIndexedPathsForRoot(AppPaths.IndexFile, root);
+                    ShareWatchReconciler.CollectChanges(
+                        ShareIndexer.EnumerateDirectoryEntries(root, root),
+                        indexedPaths,
+                        seenPaths,
+                        additions,
+                        removes);
+                }
+
+                lock (_lock)
+                {
+                    if (_disposed || _onIndexChanged == null || generation != _operationGeneration)
+                        return;
                 }
 
                 var result = IndexStore.ApplyIncrementalChanges(AppPaths.IndexFile, additions, removes);
@@ -275,6 +286,7 @@ namespace Nsqs
 
         private void StopWatchersLocked(bool clearPending)
         {
+            _operationGeneration++;
             _flushTimer?.Dispose();
             _flushTimer = null;
             _restartTimer?.Dispose();

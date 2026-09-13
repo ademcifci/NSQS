@@ -130,6 +130,80 @@ namespace Nsqs
             return store.Search(query, maxResults, rootShares);
         }
 
+        public static IReadOnlyList<FolderEntry> ReadEntriesForRoots(string dbPath, IReadOnlyList<string> rootShares)
+        {
+            if (!File.Exists(dbPath) || rootShares.Count == 0)
+                return Array.Empty<FolderEntry>();
+
+            var normalizedRoots = NormalizeRootSharesStatic(rootShares);
+            if (normalizedRoots.Count == 0)
+                return Array.Empty<FolderEntry>();
+
+            using var connection = OpenReadOnlyConnection(dbPath);
+            using var cmd = connection.CreateCommand();
+
+            if (normalizedRoots.Count == 1)
+            {
+                cmd.CommandText = """
+                    SELECT name, path, root_share
+                    FROM folders_fts
+                    WHERE root_share = $root0
+                    ORDER BY path;
+                    """;
+                cmd.Parameters.AddWithValue("$root0", normalizedRoots[0]);
+            }
+            else
+            {
+                var placeholders = string.Join(", ", normalizedRoots.Select((_, i) => $"$root{i}"));
+                cmd.CommandText = $"""
+                    SELECT name, path, root_share
+                    FROM folders_fts
+                    WHERE root_share IN ({placeholders})
+                    ORDER BY path;
+                    """;
+                for (int i = 0; i < normalizedRoots.Count; i++)
+                    cmd.Parameters.AddWithValue($"$root{i}", normalizedRoots[i]);
+            }
+
+            var results = new List<FolderEntry>();
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(new FolderEntry
+                {
+                    Name = reader.GetString(0),
+                    Path = reader.GetString(1),
+                    RootShare = reader.GetString(2)
+                });
+            }
+
+            return results;
+        }
+
+        public static IReadOnlyList<string> GetIndexedPathsForRoot(string dbPath, string rootShare)
+        {
+            var normalizedRoot = ShareIndexer.NormalizeUncRoot(rootShare);
+            if (normalizedRoot == null || !File.Exists(dbPath))
+                return Array.Empty<string>();
+
+            using var connection = OpenReadOnlyConnection(dbPath);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT path
+                FROM folders_fts
+                WHERE root_share = $root
+                ORDER BY path;
+                """;
+            cmd.Parameters.AddWithValue("$root", normalizedRoot);
+
+            var paths = new List<string>();
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                paths.Add(reader.GetString(0));
+
+            return paths;
+        }
+
         public static void InitializeDatabase(string dbPath)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
@@ -377,12 +451,18 @@ namespace Nsqs
             return trimmed.TrimEnd('\\');
         }
 
-        private static SqliteConnection OpenReadWriteConnection(string dbPath)
+        private static SqliteConnection OpenReadWriteConnection(string dbPath) =>
+            OpenConnection(dbPath, SqliteOpenMode.ReadWrite);
+
+        private static SqliteConnection OpenReadOnlyConnection(string dbPath) =>
+            OpenConnection(dbPath, SqliteOpenMode.ReadOnly);
+
+        private static SqliteConnection OpenConnection(string dbPath, SqliteOpenMode mode)
         {
             var builder = new SqliteConnectionStringBuilder
             {
                 DataSource = dbPath,
-                Mode = SqliteOpenMode.ReadWrite,
+                Mode = mode,
                 Cache = SqliteCacheMode.Default
             };
 
@@ -539,7 +619,10 @@ namespace Nsqs
             }
         }
 
-        private static List<string> NormalizeRootShares(IReadOnlyList<string>? rootShares)
+        private static List<string> NormalizeRootShares(IReadOnlyList<string>? rootShares) =>
+            NormalizeRootSharesStatic(rootShares);
+
+        private static List<string> NormalizeRootSharesStatic(IReadOnlyList<string>? rootShares)
         {
             if (rootShares == null || rootShares.Count == 0)
                 return new List<string>();
