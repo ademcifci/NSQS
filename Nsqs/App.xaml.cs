@@ -32,6 +32,7 @@ namespace Nsqs
         private SettingsWindow? _settingsWindow;
         private bool _isExiting;
         private bool _isClosingMainWindowForModeChange;
+        private string? _hotkeyRegistrationError;
 
         protected override void OnStartup(StartupEventArgs e)
         {
@@ -78,7 +79,6 @@ namespace Nsqs
                 _launcherWindow = new LauncherWindow(() => _settings, () => _indexer.IsRunning);
                 _hotkeyManager = new HotkeyManager();
                 _hotkeyManager.HotkeyPressed += ToggleLauncher;
-                RegisterHotkeyFromSettings();
 
                 ApplyLaunchMode();
                 if (!_settings.LaunchToTray)
@@ -89,6 +89,8 @@ namespace Nsqs
                 _trayIcon.SettingsRequested += OpenSettings;
                 _trayIcon.RebuildIndexRequested += RequestRebuildIndex;
                 _trayIcon.ExitRequested += ExitApplication;
+
+                RegisterHotkeyFromSettings();
 
                 SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
 
@@ -187,13 +189,15 @@ namespace Nsqs
 
             if (_hotkeyManager.TryRegister(_settings.Hotkey, out var error))
             {
+                _hotkeyRegistrationError = null;
                 Diagnostics.Log($"Hotkey registered: {_settings.Hotkey}");
                 return;
             }
 
-            Diagnostics.Log($"Hotkey registration failed: {error}");
-            _trayIcon?.SetStatus($"{ProductName} (hotkey unavailable)", error);
-            _trayIcon?.ShowWarning(App.ShortName, error ?? "Hotkey unavailable.");
+            _hotkeyRegistrationError = error ?? "Hotkey unavailable.";
+            Diagnostics.Log($"Hotkey registration failed: {_hotkeyRegistrationError}");
+            _trayIcon?.SetStatus($"{ProductName} (hotkey unavailable)", _hotkeyRegistrationError);
+            _trayIcon?.ShowWarning(App.ShortName, _hotkeyRegistrationError);
         }
 
         private void ToggleLauncher()
@@ -398,6 +402,15 @@ namespace Nsqs
                 _trayIcon.SetStatus(progress.CurrentRoot == null
                     ? $"{ProductName}: indexing {progress.FoldersIndexed:N0} folders ({elapsed})"
                     : $"{ProductName}: {progress.FoldersIndexed:N0} folders ({elapsed})");
+                return;
+            }
+
+            if (_hotkeyRegistrationError != null)
+            {
+                var baseText = _settings.LastIndexedAt.HasValue
+                    ? $"{ProductName}: {_settings.LastIndexEntryCount:N0} folders"
+                    : $"{ProductName}: no index yet";
+                _trayIcon.SetStatus(baseText, "hotkey unavailable");
                 return;
             }
 

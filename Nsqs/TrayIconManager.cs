@@ -62,9 +62,11 @@ namespace Nsqs
 
         private void OnNotifyIconMouseClick(object? sender, MouseEventArgs e)
         {
-            if (e.Button != MouseButtons.Left || e.Clicks != 1)
+            if (e.Button != MouseButtons.Left)
                 return;
 
+            // NotifyIcon raises MouseClick with Clicks=0 (see WmMouseUp in NotifyIcon).
+            // Do not require Clicks==1 — that would block all tray left-clicks.
             LauncherRequested?.Invoke();
         }
 

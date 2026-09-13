@@ -18,6 +18,8 @@ namespace Nsqs
         private readonly IndexScheduler _scheduler;
         private readonly Action _onSaved;
         private readonly Action _requestRebuild;
+        private bool _isDirty;
+        private bool _suppressDirty;
 
         public SettingsWindow(
             Func<AppSettings> getSettings,
@@ -39,8 +41,42 @@ namespace Nsqs
 
             _indexer.ProgressChanged += OnIndexProgress;
 
+            WireDirtyTracking();
             LoadFromSettings();
             RefreshStatus();
+        }
+
+        private void WireDirtyTracking()
+        {
+            HotkeyText.TextChanged += (_, _) => MarkDirty();
+            MaxResultsText.TextChanged += (_, _) => MarkDirty();
+            ScheduleTimeText.TextChanged += (_, _) => MarkDirty();
+            ScheduleEnabledCheck.Click += (_, _) => MarkDirty();
+            RunMissedCheck.Click += (_, _) => MarkDirty();
+            LaunchToTrayCheck.Click += (_, _) => MarkDirty();
+            StartWithWindowsCheck.Click += (_, _) => MarkDirty();
+            ScheduleKindCombo.SelectionChanged += (_, _) => MarkDirty();
+            DayOfWeekCombo.SelectionChanged += (_, _) => MarkDirty();
+        }
+
+        private void MarkDirty()
+        {
+            if (!_suppressDirty)
+                _isDirty = true;
+        }
+
+        private void SyncFromSourceIfClean()
+        {
+            ReloadSettingsFromSource();
+            if (!_isDirty)
+                LoadFromSettings();
+
+            RefreshStatus();
+        }
+
+        private void ReloadSettingsFromSource()
+        {
+            _settings = CloneSettings(_getSettings());
         }
 
         private static AppSettings CloneSettings(AppSettings source)
@@ -68,24 +104,28 @@ namespace Nsqs
             };
         }
 
-        private void ReloadSettingsFromSource()
-        {
-            _settings = CloneSettings(_getSettings());
-        }
-
         private void LoadFromSettings()
         {
-            ShareRootsList.ItemsSource = _settings.ShareRoots.ToList();
-            HotkeyText.Text = _settings.Hotkey;
-            MaxResultsText.Text = _settings.MaxResults.ToString();
-            ScheduleEnabledCheck.IsChecked = _settings.IndexSchedule.Enabled;
-            ScheduleKindCombo.SelectedIndex = _settings.IndexSchedule.Kind == IndexScheduleKind.Weekly ? 1 : 0;
-            DayOfWeekCombo.SelectedIndex = (int)_settings.IndexSchedule.DayOfWeek;
-            ScheduleTimeText.Text = AppSettings.FormatScheduleTime(_settings.GetScheduleTimeOfDay());
-            RunMissedCheck.IsChecked = _settings.RunMissedIndexOnStartup;
-            LaunchToTrayCheck.IsChecked = _settings.LaunchToTray;
-            StartWithWindowsCheck.IsChecked = _settings.StartWithWindows;
-            UpdateDayOfWeekVisibility();
+            _suppressDirty = true;
+            try
+            {
+                _isDirty = false;
+                ShareRootsList.ItemsSource = _settings.ShareRoots.ToList();
+                HotkeyText.Text = _settings.Hotkey;
+                MaxResultsText.Text = _settings.MaxResults.ToString();
+                ScheduleEnabledCheck.IsChecked = _settings.IndexSchedule.Enabled;
+                ScheduleKindCombo.SelectedIndex = _settings.IndexSchedule.Kind == IndexScheduleKind.Weekly ? 1 : 0;
+                DayOfWeekCombo.SelectedIndex = (int)_settings.IndexSchedule.DayOfWeek;
+                ScheduleTimeText.Text = AppSettings.FormatScheduleTime(_settings.GetScheduleTimeOfDay());
+                RunMissedCheck.IsChecked = _settings.RunMissedIndexOnStartup;
+                LaunchToTrayCheck.IsChecked = _settings.LaunchToTray;
+                StartWithWindowsCheck.IsChecked = _settings.StartWithWindows;
+                UpdateDayOfWeekVisibility();
+            }
+            finally
+            {
+                _suppressDirty = false;
+            }
         }
 
         private void RefreshStatus()
@@ -164,7 +204,9 @@ namespace Nsqs
                 if (progress.IsComplete)
                 {
                     HideIndexProgress();
-                    LoadFromSettings();
+                    if (!_isDirty)
+                        LoadFromSettings();
+
                     RefreshStatus();
                     return;
                 }
@@ -236,6 +278,7 @@ namespace Nsqs
             ShareRootsList.ItemsSource = list;
             ShareRootsList.SelectedItem = normalized;
             NewShareText.Text = normalized;
+            MarkDirty();
         }
 
         private void RemoveShare_Click(object sender, RoutedEventArgs e)
@@ -247,6 +290,7 @@ namespace Nsqs
             list.Remove(selected);
             ShareRootsList.ItemsSource = null;
             ShareRootsList.ItemsSource = list;
+            MarkDirty();
         }
 
         private void RebuildButton_Click(object sender, RoutedEventArgs e)
@@ -393,9 +437,7 @@ namespace Nsqs
         protected override void OnActivated(EventArgs e)
         {
             base.OnActivated(e);
-            ReloadSettingsFromSource();
-            LoadFromSettings();
-            RefreshStatus();
+            SyncFromSourceIfClean();
         }
 
         protected override void OnClosed(EventArgs e)
