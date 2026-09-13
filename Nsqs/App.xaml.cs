@@ -22,6 +22,7 @@ namespace Nsqs
         private AppSettings _settings = new();
         private IndexStore _indexStore = new();
         private ShareIndexer _indexer = new();
+        private ShareFolderWatcher? _folderWatcher;
         private IndexScheduler? _scheduler;
         private HotkeyManager? _hotkeyManager;
         private LauncherWindow? _launcherWindow;
@@ -123,7 +124,43 @@ namespace Nsqs
             {
                 Diagnostics.Log("No index yet; starting initial rebuild.");
                 RequestRebuildIndex();
+                return;
             }
+
+            StartFolderWatcherIfReady();
+        }
+
+        private void StartFolderWatcherIfReady()
+        {
+            if (_indexer.IsRunning || _settings.ShareRoots.Count == 0)
+                return;
+
+            if (!File.Exists(AppPaths.IndexFile) || !_settings.LastIndexedAt.HasValue)
+                return;
+
+            _folderWatcher ??= new ShareFolderWatcher();
+            _folderWatcher.Start(_settings.ShareRoots, OnFolderIndexChanged);
+        }
+
+        private void StopFolderWatcher()
+        {
+            _folderWatcher?.Stop();
+        }
+
+        private void OnFolderIndexChanged(int totalCount)
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (_appLifetimeCts.IsCancellationRequested)
+                    return;
+
+                if (_indexStore.IsOpen)
+                    _indexStore.Reopen();
+
+                _settings.LastIndexEntryCount = totalCount;
+                _settings.Save();
+                UpdateTrayStatus();
+            });
         }
 
         private void RegisterHotkeyFromSettings()
@@ -258,6 +295,7 @@ namespace Nsqs
 
         private void PrepareForIndexRebuild()
         {
+            StopFolderWatcher();
             _indexStore.Close();
             SqliteConnection.ClearAllPools();
             GC.Collect();
@@ -297,6 +335,7 @@ namespace Nsqs
                     _settings = AppSettings.Load();
                     _trayIcon?.SetRebuildEnabled(true);
                     UpdateTrayStatus();
+                    StartFolderWatcherIfReady();
                 });
             }, TaskScheduler.Default);
         }
@@ -307,6 +346,7 @@ namespace Nsqs
             _indexStore.OpenForSearch(AppPaths.IndexFile);
             _settings = AppSettings.Load();
             UpdateTrayStatus();
+            StartFolderWatcherIfReady();
         }
 
         private void OnIndexProgress(IndexProgress progress)
@@ -321,7 +361,10 @@ namespace Nsqs
                     if (!progress.IsFailed)
                         OnIndexDatabaseSwapped();
                     else
+                    {
                         EnsureIndexStoreOpen();
+                        StartFolderWatcherIfReady();
+                    }
 
                     _trayIcon?.SetRebuildEnabled(true);
                 }
@@ -399,6 +442,7 @@ namespace Nsqs
                     _scheduler?.Reschedule();
                     ApplyLaunchMode();
                     UpdateTrayStatus();
+                    StartFolderWatcherIfReady();
                 },
                 requestRebuild: RequestRebuildIndex);
 
@@ -414,6 +458,7 @@ namespace Nsqs
             SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
 
             _indexer.ProgressChanged -= OnIndexProgress;
+            _folderWatcher?.Dispose();
             _scheduler?.Dispose();
             _hotkeyManager?.Dispose();
             _trayIcon?.Dispose();
